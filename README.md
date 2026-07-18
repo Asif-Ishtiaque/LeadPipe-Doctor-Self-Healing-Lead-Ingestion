@@ -244,6 +244,16 @@ Recording notes and the shot-by-shot script are in
 
 ## Limitations and future work
 
+- **Cross-batch dedup's race protection is Postgres-only.** A QA audit
+  found concurrent requests for the same lead could each see "not found"
+  and each insert their own "clean" row (confirmed with 20 real threads:
+  all 20 inserted separately). Fixed with a `pg_advisory_xact_lock` per
+  email/phone around the check-then-insert in
+  `app/utils/storage.py:persist_leads_atomic`, serializing only requests
+  racing on the *same* identifier. DuckDB (the local dev fallback) has no
+  equivalent primitive, so that path is still technically racy there --
+  acceptable for now since DuckDB only supports one writer process at all,
+  making true concurrent writes an edge case already.
 - **Model size is a memory/quality tradeoff.** `qwen2.5:3b` is the default
   because it reliably loads in ~4GB of RAM alongside Postgres, ChromaDB,
   and the API -- important on machines with 8GB total RAM, where Docker

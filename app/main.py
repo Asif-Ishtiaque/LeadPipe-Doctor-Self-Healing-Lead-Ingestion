@@ -15,17 +15,26 @@ from fastapi.responses import JSONResponse
 from app.agent import human_review
 from app.agent.graph import run_self_healing
 from app.schema.canonical import LeadSource
-from app.utils.storage import get_stats, read_table, save_healing_events, save_invalid, save_leads
+from app.utils.storage import get_stats, persist_leads_atomic, read_table, save_healing_events, save_invalid, save_leads
 
 app = FastAPI(title="LeadPipe Doctor", description="Self-healing lead ingestion agent")
 
 
 def _persist_and_summarize(source: LeadSource, final_state: dict) -> dict[str, Any]:
     result = final_state.get("result")
+    summary = None
     if result is not None:
-        save_leads(result.scored_leads, table="leads")
-        save_leads(result.duplicates, table="duplicate_leads")
+        # persist_leads_atomic is the actual source of truth for what got
+        # kept vs. deduped -- it can reclassify a lead that in-batch dedup
+        # upstream thought was "kept" into a duplicate, if a concurrent
+        # request already claimed that email/phone first. The summary
+        # reflects that real outcome, not the pre-persistence guess.
+        actually_kept, redirected = persist_leads_atomic(result.scored_leads)
+        all_duplicates = result.duplicates + redirected
+        save_leads(all_duplicates, table="duplicate_leads")
         save_invalid(result.invalid, source=source.value)
+
+        summary = {**result.summary, "scored": len(actually_kept), "duplicates": len(all_duplicates)}
 
     save_healing_events(source.value, final_state["healing_events"])
 
@@ -33,7 +42,7 @@ def _persist_and_summarize(source: LeadSource, final_state: dict) -> dict[str, A
         "status": final_state["status"],
         "retries": final_state["retries"],
         "healing_events": final_state["healing_events"],
-        "summary": result.summary if result else None,
+        "summary": summary,
     }
 
 

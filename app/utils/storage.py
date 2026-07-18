@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 from sqlalchemy import create_engine, inspect, text
 
-from app.schema.canonical import Lead
+from app.schema.canonical import Lead, LeadStatus
 from app.utils.config import settings
 
 
@@ -111,14 +111,14 @@ _CROSS_BATCH_CHUNK_SIZE = 1000
 
 
 def find_existing_leads(emails: list[str], phones: list[str]) -> dict[str, str]:
-    """Cross-batch dedup: which of these emails/phones already exist in the
-    `leads` table from a *previous* ingest, not just this batch? Returns
-    {"email:<lowercased email>" | "phone:<e164>": existing lead_id}.
-
-    Without this, the same lead submitted in two separate API calls (the
-    normal way webhooks actually arrive -- one lead at a time, not in
-    bulk) was never checked against anything already stored, so repeat
-    submissions all came through as separate "valid" rows.
+    """Cheap, non-atomic pre-filter: which of these emails/phones already
+    exist in `leads`? Used as a fast-path optimization to skip obviously-
+    duplicate work before scoring/persistence -- NOT a correctness
+    guarantee against concurrent requests (see persist_leads_atomic for
+    that; a QA audit proved this check-then-later-insert pattern alone
+    lets concurrent requests race: 15 threads submitting the identical
+    lead simultaneously each saw "not found" here and each inserted their
+    own "clean" row -- 15 duplicates of the same person, none flagged).
 
     Values are deduplicated and chunked into batches of
     _CROSS_BATCH_CHUNK_SIZE before building each IN (...) query -- a
@@ -157,6 +157,92 @@ def find_existing_leads(emails: list[str], phones: list[str]) -> dict[str, str]:
             for lead_id, phone in rows:
                 matches[f"phone:{phone}"] = lead_id
     return matches
+
+
+def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
+    """The race-safe version of "check if it exists, then insert" -- the
+    only place that's actually allowed to write to `leads`. On Postgres,
+    each lead's email and phone are hashed into a `pg_advisory_xact_lock`
+    before checking existence, so two concurrent requests racing on the
+    *same* identifier serialize on that lock instead of both seeing "not
+    found" (confirmed with 15 real concurrent threads before this fix:
+    all 15 inserted their own "clean" copy of the same person). Requests
+    for *different* leads don't contend at all -- the lock is per-key, not
+    a table-wide lock.
+
+    On DuckDB (local dev fallback) there's no advisory lock primitive, and
+    DuckDB only supports one writer process at a time anyway (a real
+    constraint discovered earlier in this project), so this falls back to
+    the plain check-then-insert -- theoretically still racy there, but a
+    single-writer database makes that race far less likely to matter in
+    practice than a real multi-worker Postgres deployment.
+
+    Returns (actually_kept, redirected_to_duplicates) -- the *true* result
+    after the atomic check, which may differ from what in-batch dedup
+    upstream thought was going to be kept."""
+    if not leads:
+        return [], []
+
+    engine = get_engine()
+    is_postgres = settings.database_url.startswith(("postgresql", "postgres"))
+
+    if not inspect(engine).has_table("leads"):
+        # Bootstrap: let pandas create the table with correctly-inferred
+        # column types the first time around. Nothing else exists yet for
+        # this row to race against.
+        first, rest = leads[0], leads[1:]
+        df = pd.DataFrame([_lead_to_row(first)])
+        df.to_sql("leads", engine, if_exists="append", index=False)
+        kept, duplicates = [first], []
+        if rest:
+            more_kept, more_duplicates = persist_leads_atomic(rest)
+            kept += more_kept
+            duplicates += more_duplicates
+        return kept, duplicates
+
+    _ensure_columns(engine, "leads", list(_lead_to_row(leads[0]).keys()))
+
+    kept: list[Lead] = []
+    duplicates: list[Lead] = []
+
+    # One transaction *per lead*, not one for the whole batch. Advisory
+    # locks acquired with pg_advisory_xact_lock live in shared memory
+    # until their transaction ends -- a single transaction wrapping a
+    # 25k-lead batch (2 locks each) exhausted Postgres's
+    # max_locks_per_transaction and crashed the whole request with
+    # "out of shared memory" (found running the full sample pack through
+    # this fix, not just the small-scale race test that caught the
+    # original bug). A short transaction per lead releases each pair of
+    # locks immediately, so the count in flight at any moment stays small
+    # regardless of how many leads are in the batch.
+    for lead in leads:
+        with engine.begin() as conn:
+            if is_postgres:
+                # Lock ordering (email hash, then phone hash) is fixed
+                # regardless of which lead is being processed, so two
+                # leads racing on both keys in opposite order can't
+                # deadlock each other.
+                conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"email:{lead.email.lower()}"})
+                conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"phone:{lead.phone_e164}"})
+
+            existing = conn.execute(
+                text("SELECT lead_id FROM leads WHERE lower(email) = :email OR phone_e164 = :phone LIMIT 1"),
+                {"email": lead.email.lower(), "phone": lead.phone_e164},
+            ).fetchone()
+
+            if existing:
+                lead.status = LeadStatus.DUPLICATE
+                lead.duplicate_of_lead_id = existing[0]
+                duplicates.append(lead)
+                continue
+
+            row = _lead_to_row(lead)
+            columns = ", ".join(row.keys())
+            placeholders = ", ".join(f":{k}" for k in row.keys())
+            conn.execute(text(f"INSERT INTO leads ({columns}) VALUES ({placeholders})"), row)
+            kept.append(lead)
+
+    return kept, duplicates
 
 
 def get_stats() -> dict:

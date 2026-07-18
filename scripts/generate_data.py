@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -51,6 +52,21 @@ PHONE_FORMATS = [
     (lambda n: "000-000-0000", 1),  # pure junk
 ]
 
+def _fake_test_email(e: str) -> str:
+    """Obviously fake, but still per-person unique with a digits-only
+    suffix ("test1182@test.com", not "test.johndoe@test.com") -- a bare
+    "test@test.com" for every occurrence would make every one of these
+    records exact-email-match each other and collapse into a single
+    duplicate cluster instead of each being individually caught; a
+    non-digit suffix like ".johndoe" wouldn't trip the placeholder-email
+    scoring signal at all, which only matches token+digits, not
+    token+anything, to avoid flagging real words/names like
+    "testimonials"."""
+    match = re.search(r"(\d+)@", e)
+    suffix = match.group(1) if match else "0"
+    return f"test{suffix}@test.com"
+
+
 # Weighted so most emails stay valid (possibly just re-cased) and a
 # minority are genuinely malformed, typo'd, or obviously fake -- includes
 # the spec's named junk: "test@test.com", "asdf@asdf", "@gmial.com" typo.
@@ -60,11 +76,7 @@ EMAIL_MANGLERS = [
     (lambda e: e.replace("@gmail.com", "@gmial.com").replace("@yahoo.com", "@yahooo.com"), 1),  # typo domain
     (lambda e: e.replace("@", " at "), 1),  # malformed
     (lambda e: e.split("@")[0], 1),  # missing domain
-    (lambda e: f"test.{e.split('@')[0]}@test.com", 1),  # obviously fake, but still per-person unique --
-    # a bare "test@test.com" for every occurrence would make every one of
-    # these records exact-email-match each other and collapse into a
-    # single duplicate cluster instead of each being individually caught
-    # by the placeholder-email scoring signal
+    (_fake_test_email, 1),
     (lambda e: "asdf@asdf", 1),  # invalid, missing TLD
     (lambda e: "", 1),
 ]

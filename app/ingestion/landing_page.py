@@ -8,10 +8,20 @@ import json
 from typing import Any
 
 
-def parse_landing_page_json(payload: dict[str, Any] | list[dict[str, Any]]) -> list[dict[str, Any]]:
+def parse_landing_page_json(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, dict):
-        payload = [payload]
-    return list(payload)
+        return [payload]
+    if isinstance(payload, list):
+        # A bare JSON string/number is technically malformed input, not a
+        # cleaning-engine bug -- treat it as "no records" (same as an
+        # empty body) rather than crashing. A QA audit found this taking
+        # down the whole request with a confusing low-level TypeError,
+        # which then wasted 6 minutes in the self-healing loop trying (and
+        # structurally unable) to fix a bug that isn't in transforms.py at
+        # all. Also drops any non-dict items a malformed array might
+        # contain (e.g. `[1, 2, "x"]`) instead of passing them downstream.
+        return [item for item in payload if isinstance(item, dict)]
+    return []
 
 
 def parse_landing_page_jsonl(text: str) -> list[dict[str, Any]]:

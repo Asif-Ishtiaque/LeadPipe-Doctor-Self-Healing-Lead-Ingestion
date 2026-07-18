@@ -64,13 +64,21 @@ def _is_placeholder_name(value: str) -> bool:
 
 
 def _is_placeholder_email(email: str) -> bool:
+    """Exact match, or the token followed by nothing but digits
+    ("test123", "admin007") -- not a blanket prefix match. A QA audit
+    caught that being far too aggressive: real first names like
+    "bartholomew@" and "nathaniel@" were getting flagged (contain "bar"/
+    "na" as a prefix), along with "testimonials@" and "administrator@".
+    Requiring the suffix to be digits-only still catches a fake address
+    with a per-submission number tacked on, without matching ordinary
+    words or names that merely start with the same letters."""
     local = email.split("@")[0].lower() if email and "@" in email else ""
-    # Prefix match, not just exact -- catches "test123@..." and
-    # "admin.backup@..." too, not only the literal bare word. Trades a
-    # small false-positive risk (a real "testimonials@..." address) for
-    # actually catching the common pattern of a fake address with a
-    # per-submission suffix tacked on.
-    return any(local == token or local.startswith(token) for token in PLACEHOLDER_EMAIL_LOCAL_PARTS)
+    for token in PLACEHOLDER_EMAIL_LOCAL_PARTS:
+        if local == token:
+            return True
+        if local.startswith(token) and local[len(token):].isdigit():
+            return True
+    return False
 
 
 def build_features(lead: Lead) -> dict[str, float]:

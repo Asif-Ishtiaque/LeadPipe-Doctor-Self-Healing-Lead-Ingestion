@@ -39,6 +39,25 @@ class PatchRejected(RuntimeError):
     syntax, or it stripped required functions)."""
 
 
+class NotHealable(RuntimeError):
+    """Raised when the exception clearly didn't originate in
+    transforms.py -- the only file this agent is scoped to patch.
+    Asking the LLM to fix it anyway is a guaranteed-useless ~2-6 minute
+    round trip (confirmed by a QA audit: malformed input that broke the
+    *ingestion* parser, not the cleaning engine, still burned a full
+    360s LLM call before falling back to human review). Skip straight
+    there instead."""
+
+
+def _originates_in_transforms(exc: BaseException) -> bool:
+    tb = exc.__traceback__
+    while tb is not None:
+        if tb.tb_frame.f_code.co_filename == str(TRANSFORMS_PATH):
+            return True
+        tb = tb.tb_next
+    return False
+
+
 REQUIRED_FUNCTIONS = {
     "normalize_phone",
     "normalize_email",
@@ -121,9 +140,14 @@ def apply_patch(new_source: str) -> Path:
 
 def heal(exc: Exception) -> tuple[ErrorInfo, str]:
     """Full heal step: capture the error, ask the LLM for a fix, validate
-    and write it. Raises OllamaUnavailable or PatchRejected on failure --
-    callers should treat either as "could not self-heal, go to human
-    review"."""
+    and write it. Raises OllamaUnavailable, PatchRejected, or NotHealable
+    on failure -- callers should treat any of those as "could not
+    self-heal, go to human review"."""
+    if not _originates_in_transforms(exc):
+        raise NotHealable(
+            f"{type(exc).__name__} did not originate in app/cleaning/transforms.py "
+            "-- self-healing is scoped to that file only, skipping a doomed LLM attempt"
+        )
     error = capture_error(exc)
     new_source = propose_patch(error)
     apply_patch(new_source)

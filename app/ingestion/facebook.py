@@ -62,14 +62,24 @@ def parse_facebook_input(raw: Any) -> list[dict[str, Any]]:
     arrives in: an already-parsed single webhook payload or list of them
     (calling this in-process, e.g. from a script or the self-healing
     demo), or raw text that's either one big JSON document or JSONL (one
-    payload per line, from an HTTP request body)."""
+    payload per line, from an HTTP request body).
+
+    A bare JSON string/number/bool at the top level, or a non-dict item
+    inside an array, is malformed input, not a cleaning-engine bug -- so
+    this treats it as "no records" (matching an empty body) instead of
+    crashing. A QA audit found that crash burning 6 minutes in the
+    self-healing loop trying (and structurally unable) to fix a bug that
+    was never in transforms.py to begin with."""
     if isinstance(raw, dict):
         return parse_facebook_webhook(raw)
     if isinstance(raw, list):
         records: list[dict[str, Any]] = []
         for item in raw:
-            records.extend(parse_facebook_webhook(item))
+            if isinstance(item, dict):
+                records.extend(parse_facebook_webhook(item))
         return records
+    if not isinstance(raw, (str, bytes)):
+        return []
 
     text = raw if isinstance(raw, str) else raw.decode()
     try:

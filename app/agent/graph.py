@@ -16,7 +16,7 @@ from typing import Any, Optional, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from app.agent import human_review
-from app.agent.healer import ErrorInfo, PatchRejected, capture_error, heal
+from app.agent.healer import ErrorInfo, NotHealable, PatchRejected, capture_error, heal
 from app.agent.pipeline import PipelineResult, run_pipeline
 from app.mapping.llm_client import OllamaUnavailable
 from app.schema.canonical import LeadSource
@@ -57,7 +57,7 @@ def _heal_node(state: AgentState) -> dict:
             "healing_events": [*state["healing_events"], event],
             "status": "healed",
         }
-    except (OllamaUnavailable, PatchRejected) as heal_exc:
+    except (OllamaUnavailable, PatchRejected, NotHealable) as heal_exc:
         return {"status": "heal_failed", "heal_error": str(heal_exc)}
 
 
