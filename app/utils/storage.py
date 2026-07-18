@@ -107,6 +107,62 @@ def read_table(table: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def _ensure_seq_column(engine, table: str) -> None:
+    """/leads, /duplicates, /invalid, /healing-events all want "the most
+    recent N rows" but none of these tables have a real ordering column --
+    they're created ad hoc by pandas.to_sql with whatever fields the
+    pipeline produced. Add a Postgres-only BIGSERIAL column
+    (auto-backfills existing rows in current physical order, and every
+    row inserted afterwards -- via to_sql or the raw INSERT in
+    persist_leads_atomic -- gets the next value automatically since
+    neither ever names this column explicitly), plus an index so ORDER BY
+    ... DESC LIMIT can use a backward index scan instead of touching every
+    row. Skipped on DuckDB (dev-only, small scale, no BIGSERIAL)."""
+    if not settings.database_url.startswith(("postgresql", "postgres")):
+        return
+    if not inspect(engine).has_table(table):
+        return
+    existing = {col["name"] for col in inspect(engine).get_columns(table)}
+    if "_seq" in existing:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(f'ALTER TABLE "{table}" ADD COLUMN _seq BIGSERIAL'))
+            conn.execute(text(f'CREATE INDEX IF NOT EXISTS ix_{table}_seq ON "{table}" (_seq DESC)'))
+    except Exception:
+        pass
+
+
+def read_recent(table: str, limit: int) -> pd.DataFrame:
+    """Fast replacement for read_table(table).tail(limit) -- that pattern
+    loads the *entire* table over the wire before pandas trims it down,
+    which measured at 200+ seconds against the /leads table once the
+    sample pack data accumulated (the exact bug that broke the dashboard).
+    This pushes both the ordering and the row limit down into SQL so
+    Postgres only ever sends back `limit` rows."""
+    engine = get_engine()
+    if not inspect(engine).has_table(table):
+        return pd.DataFrame()
+
+    is_postgres = settings.database_url.startswith(("postgresql", "postgres"))
+    try:
+        if is_postgres:
+            _ensure_seq_column(engine, table)
+            df = pd.read_sql_query(
+                text(f'SELECT * FROM "{table}" ORDER BY _seq DESC LIMIT :limit'),
+                engine,
+                params={"limit": limit},
+            )
+            df = df.iloc[::-1].reset_index(drop=True)  # restore ascending order, same as the old .tail()
+        else:
+            # DuckDB dev fallback: no BIGSERIAL/backward-index-scan story,
+            # but also never runs at a scale where a plain LIMIT is slow.
+            df = pd.read_sql_query(text(f'SELECT * FROM "{table}" LIMIT :limit'), engine, params={"limit": limit})
+        return df.drop(columns=["_seq"], errors="ignore")
+    except Exception:
+        return pd.DataFrame()
+
+
 _CROSS_BATCH_CHUNK_SIZE = 1000
 
 

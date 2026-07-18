@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from app.agent import human_review
 from app.agent.graph import run_self_healing
 from app.schema.canonical import LeadSource
-from app.utils.storage import get_stats, persist_leads_atomic, read_table, save_healing_events, save_invalid, save_leads
+from app.utils.storage import get_stats, persist_leads_atomic, read_recent, save_healing_events, save_invalid, save_leads
 
 app = FastAPI(title="LeadPipe Doctor", description="Self-healing lead ingestion agent")
 
@@ -86,26 +86,22 @@ async def ingest_google_form(file: UploadFile) -> JSONResponse:
 
 @app.get("/leads")
 def list_leads(limit: int = 100) -> list[dict[str, Any]]:
-    df = read_table("leads")
-    return df.tail(limit).to_dict(orient="records")
+    return read_recent("leads", limit).to_dict(orient="records")
 
 
 @app.get("/duplicates")
 def list_duplicates(limit: int = 1000) -> list[dict[str, Any]]:
-    df = read_table("duplicate_leads")
-    return df.tail(limit).to_dict(orient="records")
+    return read_recent("duplicate_leads", limit).to_dict(orient="records")
 
 
 @app.get("/invalid")
 def list_invalid(limit: int = 1000) -> list[dict[str, Any]]:
-    df = read_table("invalid_leads")
-    return df.tail(limit).to_dict(orient="records")
+    return read_recent("invalid_leads", limit).to_dict(orient="records")
 
 
 @app.get("/healing-events")
 def list_healing_events(limit: int = 1000) -> list[dict[str, Any]]:
-    df = read_table("healing_events")
-    return df.tail(limit).to_dict(orient="records")
+    return read_recent("healing_events", limit).to_dict(orient="records")
 
 
 @app.get("/stats")
