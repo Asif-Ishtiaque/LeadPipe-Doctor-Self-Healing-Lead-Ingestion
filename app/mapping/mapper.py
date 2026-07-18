@@ -93,6 +93,14 @@ def _llm_match(field_name: str, samples: list[str]) -> str | None:
     context_block = "\n".join(f"- {c['field']}: {c['description']}" for c in context)
 
     prompt = f"""You are mapping a messy CRM lead field onto a canonical schema.
+Source fields are often phrased as casual questions, not keywords -- infer
+the intent, don't just pattern-match on words. For example:
+- "What is your full name?" -> full_name
+- "Where can we reach you by phone?" -> phone_e164
+- "Which campaign brought you here?" -> campaign_id
+- "May we contact you about updates?" -> consent
+Only answer "unknown" if the field genuinely doesn't correspond to any
+canonical field below, not just because the wording is indirect.
 
 Canonical fields you may choose from (plus "full_name" if the field holds a
 combined first+last name, and "unknown" if nothing fits):

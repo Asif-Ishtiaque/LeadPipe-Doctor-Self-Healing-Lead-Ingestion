@@ -29,6 +29,15 @@ def clean_record(record: dict[str, Any]) -> dict[str, Any]:
         cleaned.setdefault("last_name", last)
     cleaned.pop("full_name", None)
 
+    # LLM field mapping occasionally maps a combined "First Last" field to
+    # first_name instead of the full_name it actually is (mapping quality
+    # varies with model size) -- if first_name has multiple words and
+    # last_name never got set, treat it the same way full_name would be.
+    if cleaned.get("first_name") and not cleaned.get("last_name"):
+        first, last = t.split_full_name(cleaned["first_name"])
+        if last:
+            cleaned["first_name"], cleaned["last_name"] = first, last
+
     if "phone_e164" in cleaned:
         cleaned["phone_e164"] = t.normalize_phone(cleaned.get("phone_e164"))
     if "email" in cleaned:
