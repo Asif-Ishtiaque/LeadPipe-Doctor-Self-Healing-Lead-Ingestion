@@ -27,11 +27,14 @@ python -m ml.train                                           # scene 6: a real M
 ```
 
 Confirm before recording:
-- Dashboard (http://localhost:8501) shows ~90k clean leads, ~14k
-  duplicates, ~95k invalid (these are the real, reproducible numbers this
-  exact sample pack + seed produces)
+- Dashboard (http://localhost:8501) shows ~30.5k clean leads, ~3.8k
+  flagged, ~3k duplicates, ~62k invalid (these are the real, reproducible
+  numbers this exact sample pack + seed produces; "flagged" is leads that
+  passed validation but tripped a quality concern -- disposable email,
+  obviously-fake test address, keyboard-mash name -- separate from
+  "clean")
 - `curl -s localhost:8000/leads?limit=100000 | python3 -c "import json,sys;print([r for r in json.load(sys.stdin) if r['last_name']=='Curie'])"`
-  shows the kept Marie Curie record at ~90 quality score
+  shows the kept Marie Curie record around 70 quality score
 - MLflow (http://localhost:5000) shows a run under experiment
   `leadpipe-doctor-scoring` with a logged MAE
 
@@ -102,12 +105,12 @@ at the real webhook URLs instead."*
 
 **On screen:** the two Marie Curie records from
 `data/demo_dedup_scoring_example.json` -- one dashboard/API view showing
-both: kept record at **90.03**, the duplicate at **45.49**.
+both: kept record around **70**, the duplicate around **25**.
 
 **Say:** *"Same person, two submissions. This one included consent and a
-campaign tag and scored 90. The other had no consent and less
-information -- scored 45, correctly identified as the weaker duplicate
-and merged out."*
+campaign tag and scored higher. The other had no consent and less
+information -- scored lower, correctly identified as the weaker
+duplicate and merged out."*
 
 (Note: use the real numbers above, not a fixed script number -- they're
 deterministic for this exact fixture, but say whatever your screen
