@@ -34,10 +34,16 @@ class LeadSource(str, Enum):
 
 
 class LeadStatus(str, Enum):
-    VALID = "valid"
-    INVALID = "invalid"
-    DUPLICATE = "duplicate"
-    HUMAN_REVIEW = "human_review"
+    # A Lead object only ever exists once it's passed Pydantic validation
+    # (a row that fails validation never becomes a Lead -- it's stored as
+    # a raw dict in invalid_leads instead, see app/validation/validator.py),
+    # so status only ever needs to distinguish three outcomes from there:
+    CLEAN = "clean"  # passed validation, no quality concerns
+    FLAGGED = "flagged"  # passed validation, but scoring found a quality concern
+    # (disposable email domain, placeholder/keyboard-mash name, etc. --
+    # see app/agent/pipeline.py) worth a human's attention before treating
+    # it like a normal lead
+    DUPLICATE = "duplicate"  # merged into another kept lead, see app/deduplication
 
 
 class Lead(BaseModel):
@@ -51,7 +57,7 @@ class Lead(BaseModel):
     consent: bool
     created_at: datetime
     quality_score: Optional[float] = Field(default=None, ge=0, le=100)
-    status: LeadStatus = LeadStatus.VALID
+    status: LeadStatus = LeadStatus.CLEAN
     # Populated when status == "duplicate": which kept lead this one was
     # merged into, so a merge can be traced/audited later instead of the
     # discarded record just vanishing into an anonymous pile.

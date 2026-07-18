@@ -15,6 +15,7 @@ FEATURE_NAMES = [
     "consent",
     "email_is_free_provider",
     "email_is_disposable",
+    "email_is_placeholder_like",
     "name_is_placeholder_like",
     "created_hour",
     *[f"source_{s}" for s in SOURCE_ORDER],
@@ -48,8 +49,28 @@ PLACEHOLDER_NAME_TOKENS = {
 }
 
 
+# Obviously-fake email local parts ("test@test.com", "asdf@asdf.com") --
+# same idea as PLACEHOLDER_NAME_TOKENS but for the part of an email
+# before the @. Not "asdf@asdf" itself (missing a TLD), which
+# email_validator already rejects as malformed before this ever runs.
+PLACEHOLDER_EMAIL_LOCAL_PARTS = {
+    "test", "testing", "asdf", "example", "admin", "user", "sample",
+    "fake", "none", "na", "foo", "bar", "spam", "noreply", "no-reply",
+}
+
+
 def _is_placeholder_name(value: str) -> bool:
     return value.strip().lower() in PLACEHOLDER_NAME_TOKENS
+
+
+def _is_placeholder_email(email: str) -> bool:
+    local = email.split("@")[0].lower() if email and "@" in email else ""
+    # Prefix match, not just exact -- catches "test123@..." and
+    # "admin.backup@..." too, not only the literal bare word. Trades a
+    # small false-positive risk (a real "testimonials@..." address) for
+    # actually catching the common pattern of a fake address with a
+    # per-submission suffix tacked on.
+    return any(local == token or local.startswith(token) for token in PLACEHOLDER_EMAIL_LOCAL_PARTS)
 
 
 def build_features(lead: Lead) -> dict[str, float]:
@@ -65,6 +86,7 @@ def build_features(lead: Lead) -> dict[str, float]:
         "consent": float(bool(lead.consent)),
         "email_is_free_provider": float(email_domain in FREE_EMAIL_DOMAINS),
         "email_is_disposable": float(email_domain in DISPOSABLE_EMAIL_DOMAINS),
+        "email_is_placeholder_like": float(_is_placeholder_email(lead.email)),
         "name_is_placeholder_like": float(_is_placeholder_name(lead.first_name) or _is_placeholder_name(lead.last_name)),
         "created_hour": float(lead.created_at.hour),
     }

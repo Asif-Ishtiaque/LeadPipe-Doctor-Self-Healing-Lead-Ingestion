@@ -19,6 +19,7 @@ WEIGHTS = {
     # gmail.com lead scored 45.49) because "not in the 5-domain freemail
     # list" was being read as "looks professional."
     "email_is_disposable": -50,
+    "email_is_placeholder_like": -30,
     "name_is_placeholder_like": -20,
 }
 

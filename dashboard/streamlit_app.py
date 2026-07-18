@@ -41,14 +41,22 @@ invalid = pd.DataFrame(fetch("/invalid", limit=100_000))
 healing = pd.DataFrame(fetch("/healing-events", limit=100_000))
 review_queue = fetch("/human-review")
 
+# `leads` holds both "clean" and "flagged" rows -- flagged didn't fail
+# validation, it just tripped a quality concern (disposable email,
+# placeholder name) worth a human glancing at before treating it like a
+# normal lead. See app/agent/pipeline.py:_flag_quality_concerns.
+clean_leads = leads[leads["status"] == "clean"] if not leads.empty and "status" in leads.columns else leads
+flagged_leads = leads[leads["status"] == "flagged"] if not leads.empty and "status" in leads.columns else pd.DataFrame()
+
 total_seen = len(leads) + len(duplicates) + len(invalid)
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Clean leads", len(leads))
-col2.metric("Duplicates removed", len(duplicates))
-col3.metric("Invalid rows", len(invalid))
-col4.metric("Self-healing events", len(healing))
-col5.metric("Pending human review", len(review_queue))
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+col1.metric("Clean leads", len(clean_leads))
+col2.metric("Flagged leads", len(flagged_leads))
+col3.metric("Duplicates removed", len(duplicates))
+col4.metric("Invalid rows", len(invalid))
+col5.metric("Self-healing events", len(healing))
+col6.metric("Pending human review", len(review_queue))
 
 st.divider()
 
@@ -68,8 +76,8 @@ with right:
     if total_seen:
         rate_df = pd.DataFrame(
             {
-                "outcome": ["clean", "duplicate", "invalid"],
-                "count": [len(leads), len(duplicates), len(invalid)],
+                "outcome": ["clean", "flagged", "duplicate", "invalid"],
+                "count": [len(clean_leads), len(flagged_leads), len(duplicates), len(invalid)],
             }
         )
         st.plotly_chart(px.pie(rate_df, names="outcome", values="count"), use_container_width=True)

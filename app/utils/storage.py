@@ -185,7 +185,8 @@ def get_stats() -> dict:
 
     return {
         "leads_by_source": leads_by_source,
-        "total_clean": scalar("SELECT count(*) FROM leads"),
+        "total_clean": scalar("SELECT count(*) FROM leads WHERE status = 'clean'"),
+        "total_flagged": scalar("SELECT count(*) FROM leads WHERE status = 'flagged'"),
         "total_invalid": scalar("SELECT count(*) FROM invalid_leads"),
         "total_duplicates": scalar("SELECT count(*) FROM duplicate_leads"),
         "avg_quality_score": round(scalar("SELECT avg(quality_score) FROM leads", default=0.0) or 0.0, 2) or None,

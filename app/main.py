@@ -7,9 +7,9 @@ persists the results, and returns a summary."""
 
 from __future__ import annotations
 
-from typing import Any, Union
+from typing import Any
 
-from fastapi import FastAPI, UploadFile
+from fastapi import FastAPI, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from app.agent import human_review
@@ -43,14 +43,21 @@ def health() -> dict[str, str]:
 
 
 @app.post("/ingest/facebook")
-def ingest_facebook(payload: dict[str, Any]) -> JSONResponse:
-    final_state = run_self_healing(LeadSource.FACEBOOK, payload)
+async def ingest_facebook(request: Request) -> JSONResponse:
+    # Raw body, not a Pydantic-parsed dict: accepts either one JSON
+    # document or JSONL (one webhook payload per line) -- FastAPI's
+    # automatic body parsing would reject JSONL as invalid JSON before
+    # our code ever saw it, since multiple newline-separated objects
+    # aren't one valid JSON document.
+    raw_text = (await request.body()).decode()
+    final_state = run_self_healing(LeadSource.FACEBOOK, raw_text)
     return JSONResponse(_persist_and_summarize(LeadSource.FACEBOOK, final_state))
 
 
 @app.post("/ingest/landing-page")
-def ingest_landing_page(payload: Union[dict[str, Any], list[dict[str, Any]]]) -> JSONResponse:
-    final_state = run_self_healing(LeadSource.LANDING_PAGE, payload)
+async def ingest_landing_page(request: Request) -> JSONResponse:
+    raw_text = (await request.body()).decode()
+    final_state = run_self_healing(LeadSource.LANDING_PAGE, raw_text)
     return JSONResponse(_persist_and_summarize(LeadSource.LANDING_PAGE, final_state))
 
 

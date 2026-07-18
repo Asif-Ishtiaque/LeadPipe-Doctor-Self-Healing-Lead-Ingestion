@@ -32,9 +32,9 @@ def wait_for_api(timeout: float = 180.0) -> None:
     raise SystemExit(f"API never became healthy within {timeout}s -- is `docker compose up` running?")
 
 
-def ingest_json(endpoint: str, path: Path) -> None:
+def ingest_jsonl(endpoint: str, path: Path) -> None:
     print(f"Ingesting {path.name} -> POST {endpoint}")
-    resp = requests.post(f"{API_BASE_URL}{endpoint}", data=path.read_bytes(), headers={"Content-Type": "application/json"})
+    resp = requests.post(f"{API_BASE_URL}{endpoint}", data=path.read_bytes())
     resp.raise_for_status()
     print(" ", resp.json()["summary"])
 
@@ -53,10 +53,10 @@ def main():
 
     wait_for_api()
 
-    ingest_json("/ingest/facebook", SAMPLE_PACK / "facebook_leads.json")
-    ingest_json("/ingest/landing-page", SAMPLE_PACK / "landing_page_leads.json")
-    ingest_csv("/ingest/instagram", SAMPLE_PACK / "instagram_leads.csv")
-    ingest_csv("/ingest/google-form", SAMPLE_PACK / "google_form_leads.csv")
+    ingest_jsonl("/ingest/facebook", SAMPLE_PACK / "facebook_leads.jsonl")
+    ingest_jsonl("/ingest/landing-page", SAMPLE_PACK / "landing_page.jsonl")
+    ingest_csv("/ingest/instagram", SAMPLE_PACK / "instagram_export.csv")
+    ingest_csv("/ingest/google-form", SAMPLE_PACK / "google_form.csv")
 
     stats = requests.get(f"{API_BASE_URL}/stats").json()
     print("\nDone. Final stats:")

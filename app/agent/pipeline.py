@@ -14,7 +14,8 @@ from app.cleaning.engine import clean_records
 from app.deduplication.dedup import deduplicate
 from app.ingestion import ingest
 from app.mapping.mapper import apply_mapping, map_source_fields
-from app.schema.canonical import Lead, LeadSource
+from app.schema.canonical import Lead, LeadSource, LeadStatus
+from app.scoring.features import build_features
 from app.scoring.scorer import LeadScorer
 from app.utils.storage import find_existing_leads
 from app.validation.validator import validate_records
@@ -59,6 +60,7 @@ def run_pipeline(source: LeadSource, raw_data: Any) -> PipelineResult:
     scored_valid = _scorer.score_batch(validation.valid)
     kept, duplicates = deduplicate(scored_valid)
     kept, duplicates = _dedup_against_existing(kept, duplicates)
+    _flag_quality_concerns(kept)
 
     return PipelineResult(
         source=source.value,
@@ -67,6 +69,19 @@ def run_pipeline(source: LeadSource, raw_data: Any) -> PipelineResult:
         invalid=validation.invalid,
         field_mapping=field_mapping,
     )
+
+
+def _flag_quality_concerns(leads: list[Lead]) -> None:
+    """A lead can pass every hard validation rule and still be worth a
+    human's second look -- a disposable-email signup or a keyboard-mash
+    name isn't invalid data, just suspect data. Marks those `flagged`
+    in place instead of leaving them indistinguishable from a genuine
+    clean lead (both already scored low by app/scoring, but the status
+    makes the reason visible without having to inspect the score)."""
+    for lead in leads:
+        features = build_features(lead)
+        if features["email_is_disposable"] or features["email_is_placeholder_like"] or features["name_is_placeholder_like"]:
+            lead.status = LeadStatus.FLAGGED
 
 
 def _dedup_against_existing(kept: list[Lead], duplicates: list[Lead]) -> tuple[list[Lead], list[Lead]]:

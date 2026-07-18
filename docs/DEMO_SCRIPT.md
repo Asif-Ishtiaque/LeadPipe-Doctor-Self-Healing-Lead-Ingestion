@@ -40,9 +40,9 @@ Confirm before recording:
 ## Scene 1 -- The problem (0:00-0:25)
 
 **On screen:** 4 raw sample files open side by side in an editor or
-terminal -- `data/sample_pack/facebook_leads.json`,
-`instagram_leads.csv`, `google_form_leads.csv`,
-`landing_page_leads.json`. Point out the same-ish person appears
+terminal -- `data/sample_pack/facebook_leads.jsonl`,
+`instagram_export.csv`, `google_form.csv`,
+`landing_page.jsonl`. Point out the same-ish person appears
 differently formatted in each (different field names, different phone
 formats).
 

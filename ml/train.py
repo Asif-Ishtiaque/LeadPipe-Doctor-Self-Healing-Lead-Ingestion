@@ -27,6 +27,7 @@ from app.schema.canonical import Lead, LeadSource  # noqa: E402
 from app.scoring.features import (  # noqa: E402
     DISPOSABLE_EMAIL_DOMAINS,
     FEATURE_NAMES,
+    PLACEHOLDER_EMAIL_LOCAL_PARTS,
     PLACEHOLDER_NAME_TOKENS,
     build_features,
     features_to_vector,
@@ -36,6 +37,7 @@ from app.utils.config import settings  # noqa: E402
 
 _DISPOSABLE_DOMAINS = list(DISPOSABLE_EMAIL_DOMAINS)
 _PLACEHOLDER_TOKENS = list(PLACEHOLDER_NAME_TOKENS)
+_PLACEHOLDER_EMAIL_LOCALS = list(PLACEHOLDER_EMAIL_LOCAL_PARTS)
 
 MODEL_OUT = Path(__file__).resolve().parent / "models" / "lead_scorer.joblib"
 N_SAMPLES = 20_000
@@ -49,6 +51,8 @@ def _synthetic_lead(i: int) -> Lead:
         email = "placeholder@example.com"
     elif random.random() < 0.08:  # occasional disposable/spam signup
         email = f"lead{i}@{random.choice(_DISPOSABLE_DOMAINS)}"
+    elif random.random() < 0.08:  # occasional obviously-fake test address
+        email = f"{random.choice(_PLACEHOLDER_EMAIL_LOCALS)}@company.com"
     else:
         email = f"lead{i}@{'gmail.com' if random.random() > 0.5 else 'company.com'}"
 
