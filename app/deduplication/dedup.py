@@ -46,6 +46,13 @@ def _completeness(lead: Lead) -> int:
     return sum(1 for v in (lead.first_name, lead.last_name, lead.email, lead.phone_e164, lead.campaign_id) if v)
 
 
+def _best_key(lead: Lead) -> tuple[float, int, object]:
+    # quality_score is the primary tiebreaker (leads are scored before
+    # dedup runs, see app/agent/pipeline.py) -- completeness and recency
+    # only matter if two leads in a cluster scored identically.
+    return (lead.quality_score or 0.0, _completeness(lead), lead.created_at)
+
+
 def deduplicate(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
     """Returns (kept, marked_as_duplicate). `kept` retains the best record
     from each cluster of matching leads; every other cluster member comes
@@ -92,7 +99,7 @@ def deduplicate(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
         if len(cluster) == 1:
             kept.append(cluster[0])
             continue
-        best = max(cluster, key=lambda lead: (_completeness(lead), lead.created_at))
+        best = max(cluster, key=_best_key)
         kept.append(best)
         for member in cluster:
             if member is not best:

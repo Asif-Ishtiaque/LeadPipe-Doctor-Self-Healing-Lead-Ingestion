@@ -73,24 +73,33 @@ queue.
                               Streamlit dashboard (dashboard/)
 ```
 
-## Tech stack and why
+## Tech stack, why, and license
 
-| Tool | Role | Why this one |
-|---|---|---|
-| **Ollama (qwen2.5:3b by default)** | Field-mapping LLM + code-patching LLM | Free, runs fully local, no API keys, no rate limits, no data leaves the machine -- required for a pipeline that ingests PII. 3b is the default so the whole stack fits comfortably in ~4GB of RAM; bump `OLLAMA_MODEL` to `qwen2.5:7b` in docker-compose.yml for better patch quality if your machine has 8GB+ to spare for Docker. |
-| **LangGraph** | Self-healing agent orchestration | The retry/heal/human-review loop is a small explicit state machine, which is exactly what LangGraph's `StateGraph` models -- conditional edges instead of hand-rolled retry loops scattered through the code. |
-| **FastAPI** | HTTP entrypoint | Async-native, Pydantic-native (shares the same validation models), minimal boilerplate for a handful of ingest/stats routes. |
-| **pandas** | CSV parsing, batch transforms | Standard for tabular ingestion (Instagram/Google Form CSVs) and for feeding the DataFrame-shaped stats the dashboard needs. |
-| **Pydantic** | Canonical schema + validation | Gives us one model (`app/schema/canonical.py:Lead`) that's simultaneously the validation layer, the FastAPI request/response shape, and the ML feature source of truth. |
-| **PostgreSQL (DuckDB fallback)** | Storage | Postgres in docker-compose for concurrent read/write from the API + dashboard; DuckDB locally so the pipeline runs with zero infra for development. Same SQLAlchemy code path either way. |
-| **ChromaDB** | RAG memory for field mapping | Stores canonical schema descriptions and every past field-mapping decision as embeddings, so mapping quality compounds instead of re-asking the LLM the same question for every batch. |
-| **nomic-embed-text (via Ollama)** | Embeddings | Free, local, good enough for short field-name-plus-sample-value strings. |
-| **XGBoost** | Lead scoring | Handles the mixed categorical/numeric feature set (source, consent, completeness) well with almost no tuning; falls back to a transparent rule-based scorer if no model has been trained yet. |
-| **rapidfuzz** | Deduplication | Fast fuzzy string matching in C, with blocking (see `app/deduplication/dedup.py`) so dedup stays roughly linear instead of comparing every pair at 100k+ rows. |
-| **MLflow** | Scoring experiment tracking | Free, local tracking server; logs the XGBoost hyperparameters/MAE for every training run. |
-| **Streamlit** | Dashboard | Fastest way to get a real, interactive dashboard out of pandas DataFrames with no separate frontend build. |
-| **Faker** | Synthetic data generation | Realistic names/emails/phones for the 100k+ row demo dataset. |
-| **Docker Compose** | Orchestration | One command spins up Postgres, Ollama, ChromaDB, the API, and the dashboard together. |
+100% free and open source, zero paid APIs and zero API keys anywhere in
+this repo (grep it: there's nothing to configure). Every model, library,
+and service below is either open-weight/open-source or free to run
+locally without an account.
+
+| Tool | Role | Why this one | License |
+|---|---|---|---|
+| **Ollama (qwen2.5:3b by default)** | Field-mapping LLM + code-patching LLM | Free, runs fully local, no API keys, no rate limits, no data leaves the machine -- required for a pipeline that ingests PII. 3b is the default so the whole stack fits comfortably in ~4GB of RAM; bump `OLLAMA_MODEL` to `qwen2.5:7b` in docker-compose.yml for better patch quality if your machine has 8GB+ to spare for Docker. | Ollama: MIT. Qwen2.5 weights: Apache-2.0 |
+| **LangGraph** | Self-healing agent orchestration | The retry/heal/human-review loop is a small explicit state machine, which is exactly what LangGraph's `StateGraph` models -- conditional edges instead of hand-rolled retry loops scattered through the code. | MIT |
+| **FastAPI** | HTTP entrypoint | Async-native, Pydantic-native (shares the same validation models), minimal boilerplate for a handful of ingest/stats routes. | MIT |
+| **pandas** | CSV parsing, batch transforms | Standard for tabular ingestion (Instagram/Google Form CSVs) and for feeding the DataFrame-shaped stats the dashboard needs. | BSD-3-Clause |
+| **Pydantic** | Canonical schema + validation | Gives us one model (`app/schema/canonical.py:Lead`) that's simultaneously the validation layer, the FastAPI request/response shape, and the ML feature source of truth. | MIT |
+| **PostgreSQL (DuckDB fallback)** | Storage | Postgres in docker-compose for concurrent read/write from the API + dashboard; DuckDB locally so the pipeline runs with zero infra for development. Same SQLAlchemy code path either way. | PostgreSQL License (MIT-like) / DuckDB: MIT |
+| **ChromaDB** | RAG memory for field mapping | Stores canonical schema descriptions and every past field-mapping decision as embeddings, so mapping quality compounds instead of re-asking the LLM the same question for every batch. | Apache-2.0 |
+| **nomic-embed-text (via Ollama)** | Embeddings | Free, local, good enough for short field-name-plus-sample-value strings. | Apache-2.0 |
+| **XGBoost** | Lead scoring | Handles the mixed categorical/numeric feature set (source, consent, completeness) well with almost no tuning; falls back to a transparent rule-based scorer if no model has been trained yet. | Apache-2.0 |
+| **rapidfuzz** | Deduplication | Fast fuzzy string matching in C, with blocking (see `app/deduplication/dedup.py`) so dedup stays roughly linear instead of comparing every pair at 100k+ rows. | MIT |
+| **MLflow** | Scoring experiment tracking | Free, local tracking server; logs the XGBoost hyperparameters/MAE for every training run. | Apache-2.0 |
+| **Streamlit** | Dashboard | Fastest way to get a real, interactive dashboard out of pandas DataFrames with no separate frontend build. | Apache-2.0 |
+| **Faker** | Synthetic data generation | Realistic names/emails/phones for the 100k+ row demo dataset. | MIT |
+| **Docker Compose** | Orchestration | One command spins up Postgres, Ollama, ChromaDB, the API, and the dashboard together. | Apache-2.0 (the Compose CLI/spec; Docker Desktop itself is free for this kind of use but proprietary -- the Docker *Engine* and everything this repo's code depends on is open source) |
+
+Full license texts are in each package's own repository; none of them
+require a purchased license, subscription, or API key for the way this
+project uses them.
 
 ## Project structure
 
@@ -108,11 +117,13 @@ leadpipe-doctor/
 │   ├── agent/                LangGraph self-healing loop
 │   └── utils/                config + storage
 ├── data/
-│   ├── raw/                  generated messy source files
-│   ├── processed/            local DuckDB file (dev mode)
-│   └── human_review/         queue.jsonl of unrecoverable batches
+│   ├── sample_pack/           committed ~100k-row demo dataset (see its own README)
+│   ├── raw/                   gitignored scratch space for freshly generated data
+│   ├── processed/             local DuckDB file (dev mode)
+│   └── human_review/          queue.jsonl of unrecoverable batches
 ├── scripts/
-│   ├── generate_data.py      100k+ synthetic messy leads
+│   ├── generate_data.py      generates a fresh N-row messy dataset
+│   ├── replay.py              ingests data/sample_pack/ through a running API
 │   └── demo_self_heal.py     intentionally breaks + heals the pipeline
 ├── ml/
 │   ├── train.py               trains the XGBoost scorer
@@ -124,17 +135,23 @@ leadpipe-doctor/
 └── requirements.txt
 ```
 
-## Setup (3 commands)
+## Quickstart (3 commands)
 
 ```bash
+git clone https://github.com/Asif-Ishtiaque/LeadPipe-Doctor-Self-Healing-Lead-Ingestion.git
+cd LeadPipe-Doctor-Self-Healing-Lead-Ingestion
 docker compose up -d          # start Postgres, Ollama, ChromaDB, API, dashboard
-docker compose exec ollama-init sh -c "ollama pull qwen2.5:3b && ollama pull nomic-embed-text"  # first run only, if ollama-init didn't finish
-python scripts/generate_data.py --total 100000    # generate the demo dataset locally
+python -m scripts.replay      # feed the committed 100k+ sample pack into the running API
 ```
 
 Then open:
+- Dashboard: http://localhost:8501 -- should show ~90k clean leads, duplicates, and invalid rows within a few minutes
 - API docs: http://localhost:8000/docs
-- Dashboard: http://localhost:8501
+
+`docker compose up -d` also starts `ollama-init`, a one-shot container
+that pulls `qwen2.5:3b` and `nomic-embed-text` automatically the first
+time -- give it a few minutes on a fresh machine before running the
+replay step, or watch it with `docker compose logs -f ollama-init`.
 
 To run without Docker (development mode, uses DuckDB instead of Postgres):
 
@@ -149,15 +166,62 @@ In development mode, field mapping automatically falls back to the
 synonym/fuzzy heuristic and self-healing routes straight to human review
 if Ollama isn't running locally -- see Limitations.
 
+## Data
+
+`data/sample_pack/` is a committed, deterministic ~100,000-row synthetic
+dataset spanning all 4 sources (see `data/sample_pack/README.md` for the
+exact file formats and the messiness rules baked into each one -- bad
+phone formats, malformed emails, missing fields, and cross-source
+duplicates). This is what `scripts/replay.py` ingests and what the demo
+video runs against.
+
+`data/raw/` is a gitignored scratch space for generating your *own* fresh
+messy dataset on demand: `python -m scripts.generate_data --total 50000`.
+
+## Fine-tune notes
+
+No model weights are fine-tuned in this project -- both LLM roles (field
+mapping and code-patching) run the stock `qwen2.5` instruct model as-is.
+Two things stand in for fine-tuning instead:
+
+- **Field mapping improves over time without retraining.** Every
+  (source, field name) mapping the LLM resolves gets embedded and stored
+  in ChromaDB (`app/mapping/rag_store.py`). The next batch from the same
+  source reuses that decision for free instead of re-asking the LLM --
+  this is the project's answer to "learning from data" without needing
+  a training loop.
+- **Prompt iteration is the real tuning lever for this model size.** The
+  smaller `qwen2.5:3b` (chosen for its ~2GB memory footprint) initially
+  answered "unknown" for casually-phrased fields like *"What's your
+  name?"* even when the correct canonical field was right there in its
+  retrieved context. Adding a handful of few-shot examples to
+  `app/mapping/mapper.py`'s prompt fixed this measurably -- see git
+  history for the before/after. If you have the RAM for `qwen2.5:7b`
+  instead, prompt engineering matters less; the tradeoff is memory vs.
+  how much prompting effort the smaller model needs.
+- **The XGBoost scorer *is* trained** (that's a separate, traditional
+  ML step, not the LLM) -- see `ml/train.py` and Limitations below for
+  what it's trained on.
+
+## Demo video
+
+[link to demo video -- add once recorded/uploaded]
+
+Recording notes and the shot-by-shot script are in
+[`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
+
 ## Demo walkthrough
 
-1. **Load messy data**: `python scripts/generate_data.py --total 100000`
-   generates `data/raw/{facebook,instagram,google_form,landing_page}_leads.*`
-   with inconsistent phone formats, malformed emails, missing fields, and
-   cross-source duplicates.
-2. **Ingest and show clean output**: POST each file to its `/ingest/*`
-   route (see `app/main.py`), then `GET /leads` or open the dashboard to
-   see the canonical, validated, scored output.
+1. **Load messy data**: `python -m scripts.replay` ingests the committed
+   `data/sample_pack/` (or generate your own fresh batch first with
+   `python -m scripts.generate_data --total 50000 --out-dir data/raw`,
+   which produces inconsistent phone formats, malformed emails, missing
+   fields, and cross-source duplicates).
+2. **Show clean output**: open the dashboard, or `GET /leads`, to see the
+   canonical, validated, scored output. Every record's `raw_payload`
+   field carries the exact original messy input alongside the cleaned
+   canonical fields, so a single row shows one lead's full journey --
+   messy source dict in, canonical Postgres row out -- side by side.
 3. **Break the schema intentionally**: `python -m scripts.demo_self_heal`
    patches `app/cleaning/transforms.py` with a bug (phone normalization
    stops casting input to `str`), then feeds it a batch with an integer
@@ -165,14 +229,17 @@ if Ollama isn't running locally -- see Limitations.
 4. **Show self-healing**: the same script's output shows the LangGraph
    agent catching the exception, asking Ollama to rewrite
    `transforms.py`, and successfully retrying -- or, if Ollama isn't
-   running, routing straight to `data/human_review/queue.jsonl`.
+   running, routing straight to `data/human_review/queue.jsonl`. This can
+   take 1-3 minutes on CPU-only inference; see Recording notes for the
+   demo video.
 5. **Show deduplication**: the dashboard's "Duplicates removed" metric and
    the union-find clustering in `app/deduplication/dedup.py` show
    cross-source duplicate detection on name/phone/email.
 6. **Show scoring**: `python -m ml.train` trains the XGBoost model on
    bootstrapped rule-based pseudo-labels (see Limitations); afterward,
    `/leads` and the dashboard's score histogram reflect the trained
-   model instead of the raw rule-based fallback.
+   model instead of the raw rule-based fallback. MLflow at
+   http://localhost:5000 shows the training run's logged accuracy (MAE).
 
 ## Limitations and future work
 

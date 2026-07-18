@@ -1,0 +1,20 @@
+[
+  {
+    "fname": "Marie",
+    "lname": "Curie",
+    "email": "marie.curie@radiuminstitute.com",
+    "mobile": "(415) 555-0199",
+    "consent": true,
+    "ts": "2026-01-01T00:00:00Z",
+    "utm_campaign": "science_fair"
+  },
+  {
+    "fname": "Marie",
+    "lname": "Curie",
+    "email": "marie.curie@gmail.com",
+    "mobile": "415-555-0199",
+    "consent": false,
+    "ts": "2026-01-02T00:00:00Z",
+    "utm_campaign": null
+  }
+]

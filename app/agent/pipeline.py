@@ -51,12 +51,16 @@ def run_pipeline(source: LeadSource, raw_data: Any) -> PipelineResult:
     cleaned_records = clean_records(mapped_records)
 
     validation = validate_records(cleaned_records, source=source.value)
-    kept, duplicates = deduplicate(validation.valid)
-    scored = _scorer.score_batch(kept)
+    # Score before deduping (not after) so every member of a duplicate
+    # cluster carries a real quality_score -- that's both what dedup uses
+    # to decide which record is "best," and what lets a human see *why*
+    # one record won over the other instead of just trusting a black box.
+    scored_valid = _scorer.score_batch(validation.valid)
+    kept, duplicates = deduplicate(scored_valid)
 
     return PipelineResult(
         source=source.value,
-        scored_leads=scored,
+        scored_leads=kept,
         duplicates=duplicates,
         invalid=validation.invalid,
         field_mapping=field_mapping,

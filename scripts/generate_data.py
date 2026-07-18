@@ -200,7 +200,10 @@ def main():
     parser.add_argument("--total", type=int, default=100_000, help="approx total raw submissions across all sources")
     parser.add_argument("--duplicate-rate", type=float, default=0.15)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--out-dir", type=str, default=None, help="defaults to data/raw")
     args = parser.parse_args()
+
+    out_dir = Path(args.out_dir) if args.out_dir else OUT_DIR
 
     random.seed(args.seed)
     Faker.seed(args.seed)
@@ -217,24 +220,24 @@ def main():
     for person in submissions:
         buckets[random.choice(list(buckets.keys()))].append(person)
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     fb_payload = {"entry": [to_facebook_entry(p) for p in buckets["facebook"]]}
-    (OUT_DIR / "facebook_leads.json").write_text(json.dumps(fb_payload, indent=2))
+    (out_dir / "facebook_leads.json").write_text(json.dumps(fb_payload, indent=2))
 
     pd.DataFrame([to_instagram_row(p) for p in buckets["instagram"]]).to_csv(
-        OUT_DIR / "instagram_leads.csv", index=False
+        out_dir / "instagram_leads.csv", index=False
     )
     pd.DataFrame([to_google_form_row(p) for p in buckets["google_form"]]).to_csv(
-        OUT_DIR / "google_form_leads.csv", index=False
+        out_dir / "google_form_leads.csv", index=False
     )
-    (OUT_DIR / "landing_page_leads.json").write_text(
+    (out_dir / "landing_page_leads.json").write_text(
         json.dumps([to_landing_page_record(p) for p in buckets["landing_page"]], default=str, indent=2)
     )
 
     print(f"Generated {len(submissions)} raw submissions from {n_unique} unique people:")
     for source, records in buckets.items():
-        print(f"  {source}: {len(records)} records -> data/raw/")
+        print(f"  {source}: {len(records)} records -> {out_dir}/")
 
 
 if __name__ == "__main__":
