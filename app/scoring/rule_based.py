@@ -21,6 +21,10 @@ WEIGHTS = {
     "email_is_disposable": -50,
     "email_is_placeholder_like": -30,
     "name_is_placeholder_like": -20,
+    # Less severe than the email/name placeholder penalties -- a 555
+    # number is Faker's synthetic-data fingerprint, not evidence of
+    # deliberate deception the way a disposable-email domain is.
+    "phone_is_placeholder": -15,
 }
 
 

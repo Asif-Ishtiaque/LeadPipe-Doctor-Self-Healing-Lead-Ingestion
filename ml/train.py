@@ -44,11 +44,19 @@ N_SAMPLES = 20_000
 
 
 def _synthetic_lead(i: int) -> Lead:
+    # The schema now allows first_name/last_name/email/phone_e164 to be
+    # genuinely None (a dirty lead is flagged, never dropped -- see
+    # app/schema/canonical.py) -- train on real missingness instead of a
+    # placeholder string standing in for "absent," which is what has_X in
+    # app/scoring/features.py actually measures (bool(lead.email), not a
+    # separate flag), so the model needs rows where that's really 0.
     has_email = random.random() > 0.15
     has_phone = random.random() > 0.15
+    has_first_name = random.random() > 0.05
+    has_last_name = random.random() > 0.05
 
     if not has_email:
-        email = "placeholder@example.com"
+        email = None
     elif random.random() < 0.08:  # occasional disposable/spam signup
         email = f"lead{i}@{random.choice(_DISPOSABLE_DOMAINS)}"
     elif random.random() < 0.08:  # occasional obviously-fake test address
@@ -56,13 +64,26 @@ def _synthetic_lead(i: int) -> Lead:
     else:
         email = f"lead{i}@{'gmail.com' if random.random() > 0.5 else 'company.com'}"
 
-    phone = f"+1415555{i % 10000:04d}" if has_phone else "+15550000000"
+    if not has_phone:
+        phone = None
+    else:
+        area = 415
+        # ~15% of real phone numbers land on NANP's 555 exchange, exactly
+        # what Faker generates for synthetic US numbers (see
+        # app/scoring/features.py:_is_placeholder_phone) -- vary it here
+        # too, or the model never sees a non-placeholder phone example
+        # and can't learn the distinction at all.
+        exchange = 555 if random.random() < 0.15 else 200 + (i % 700)
+        subscriber = i % 10000
+        phone = f"+1{area}{exchange:03d}{subscriber:04d}"
 
-    if random.random() < 0.08:  # occasional keyboard-mash/placeholder name
+    if not has_first_name:
+        first_name = None
+    elif random.random() < 0.08:  # occasional keyboard-mash/placeholder name
         first_name = random.choice(_PLACEHOLDER_TOKENS)
     else:
         first_name = "Sample"
-    last_name = "Lead" if random.random() > 0.1 else "X"
+    last_name = None if not has_last_name else ("Lead" if random.random() > 0.1 else "X")
 
     return Lead(
         lead_id=f"train-{i}",

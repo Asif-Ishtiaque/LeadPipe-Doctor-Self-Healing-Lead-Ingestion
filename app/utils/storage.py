@@ -272,19 +272,32 @@ def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
     # locks immediately, so the count in flight at any moment stays small
     # regardless of how many leads are in the batch.
     for lead in leads:
+        email_key = lead.email.lower() if lead.email else None
         with engine.begin() as conn:
             if is_postgres:
                 # Lock ordering (email hash, then phone hash) is fixed
                 # regardless of which lead is being processed, so two
                 # leads racing on both keys in opposite order can't
-                # deadlock each other.
-                conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"email:{lead.email.lower()}"})
-                conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"phone:{lead.phone_e164}"})
+                # deadlock each other. A lead with neither identifier
+                # (schema now allows both to be null -- see
+                # app/schema/canonical.py) has nothing to protect against
+                # concurrent duplicates, so it skips locking entirely and
+                # is always treated as new.
+                if email_key:
+                    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"email:{email_key}"})
+                if lead.phone_e164:
+                    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"phone:{lead.phone_e164}"})
 
-            existing = conn.execute(
-                text("SELECT lead_id FROM leads WHERE lower(email) = :email OR phone_e164 = :phone LIMIT 1"),
-                {"email": lead.email.lower(), "phone": lead.phone_e164},
-            ).fetchone()
+            existing = None
+            if email_key or lead.phone_e164:
+                # lower(email) = NULL and phone_e164 = NULL both evaluate
+                # to NULL (never true) in SQL, so passing None through for
+                # whichever identifier is missing is safe -- no need for
+                # explicit IS NOT NULL guards here.
+                existing = conn.execute(
+                    text("SELECT lead_id FROM leads WHERE lower(email) = :email OR phone_e164 = :phone LIMIT 1"),
+                    {"email": email_key, "phone": lead.phone_e164},
+                ).fetchone()
 
             if existing:
                 lead.status = LeadStatus.DUPLICATE

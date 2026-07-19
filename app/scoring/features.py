@@ -2,6 +2,8 @@
 Shared by both the rule-based scorer and the XGBoost model so the two stay
 comparable."""
 
+from __future__ import annotations
+
 from app.schema.canonical import Lead, LeadSource
 
 SOURCE_ORDER = [s.value for s in LeadSource]
@@ -17,6 +19,7 @@ FEATURE_NAMES = [
     "email_is_disposable",
     "email_is_placeholder_like",
     "name_is_placeholder_like",
+    "phone_is_placeholder",
     "created_hour",
     *[f"source_{s}" for s in SOURCE_ORDER],
 ]
@@ -59,8 +62,22 @@ PLACEHOLDER_EMAIL_LOCAL_PARTS = {
 }
 
 
-def _is_placeholder_name(value: str) -> bool:
+def _is_placeholder_name(value: str | None) -> bool:
+    if not value:
+        return False
     return value.strip().lower() in PLACEHOLDER_NAME_TOKENS
+
+
+def _is_placeholder_phone(phone_e164: str | None) -> bool:
+    """NANP's 555 exchange (+1AAA555XXXX) is reserved for
+    fiction/directory-assistance use and is exactly what Faker generates
+    for synthetic US phone numbers -- structurally a real, possible
+    number (normalize_phone now accepts it, see
+    app/cleaning/transforms.py), but not a number anyone could actually
+    be reached at. A quality signal, not a rejection reason."""
+    if not phone_e164 or not phone_e164.startswith("+1") or len(phone_e164) != 12:
+        return False
+    return phone_e164[5:8] == "555"
 
 
 def _is_placeholder_email(email: str) -> bool:
@@ -96,6 +113,7 @@ def build_features(lead: Lead) -> dict[str, float]:
         "email_is_disposable": float(email_domain in DISPOSABLE_EMAIL_DOMAINS),
         "email_is_placeholder_like": float(_is_placeholder_email(lead.email)),
         "name_is_placeholder_like": float(_is_placeholder_name(lead.first_name) or _is_placeholder_name(lead.last_name)),
+        "phone_is_placeholder": float(_is_placeholder_phone(lead.phone_e164)),
         "created_hour": float(lead.created_at.hour),
     }
     for s in SOURCE_ORDER:

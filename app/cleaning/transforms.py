@@ -54,7 +54,16 @@ def normalize_phone(value: Any, default_region: str = "US") -> str | None:
         parsed = phonenumbers.parse(text, default_region)
     except phonenumbers.NumberParseException:
         return None
-    if not phonenumbers.is_valid_number(parsed):
+    # is_possible_number (length/format plausibility) rather than
+    # is_valid_number (real, assignable range) -- the stricter check
+    # rejected NANP's 555 exchange, which is exactly what Faker generates
+    # for synthetic US phone numbers and accounted for 111 of 238 leads
+    # an external review found being dropped entirely from one Facebook
+    # sample batch. A lead a business paid for doesn't stop being a lead
+    # because the phone number turns out to be fake -- see
+    # app/scoring/features.py:_is_placeholder_phone for how that's
+    # surfaced as a quality signal instead.
+    if not phonenumbers.is_possible_number(parsed):
         return None
     return phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
 
@@ -95,14 +104,20 @@ def parse_datetime_utc(value: Any) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def normalize_consent(value: Any) -> bool | None:
+def normalize_consent(value: Any) -> bool:
+    # TCPA-safe default: missing or ambiguous consent reads as False
+    # (never contacted), not as a dropped lead. An earlier version
+    # returned None here, which -- combined with consent being a
+    # required field -- meant a lead with no consent value at all failed
+    # schema validation and was rejected outright instead of simply being
+    # treated as "hasn't consented."
     if isinstance(value, bool):
         return value
     if value is None:
-        return None
+        return False
     text = str(value).strip().lower()
     if not text:
-        return None
+        return False
     if text in CONSENT_TRUE:
         return True
     if text in CONSENT_FALSE:
@@ -111,7 +126,7 @@ def normalize_consent(value: Any) -> bool | None:
         return False
     if any(phrase in text for phrase in CONSENT_TRUE_PHRASES):
         return True
-    return None
+    return False
 
 
 def split_full_name(value: Any) -> tuple[str | None, str | None]:

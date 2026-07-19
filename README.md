@@ -141,7 +141,7 @@ leadpipe-doctor/
 git clone https://github.com/Asif-Ishtiaque/LeadPipe-Doctor-Self-Healing-Lead-Ingestion.git
 cd LeadPipe-Doctor-Self-Healing-Lead-Ingestion
 docker compose up -d          # start Postgres, Ollama, ChromaDB, API, dashboard
-python -m scripts.replay      # feed the committed 100k+ sample pack into the running API
+python3 -m scripts.replay     # feed the committed 100k+ sample pack into the running API
 ```
 
 Then open:
@@ -166,6 +166,36 @@ In development mode, field mapping automatically falls back to the
 synonym/fuzzy heuristic and self-healing routes straight to human review
 if Ollama isn't running locally -- see Limitations.
 
+## Tests
+
+```bash
+.venv/bin/python3 -m pytest tests/ -v
+```
+
+No network, no Docker, no Ollama needed -- everything here runs against
+plain Python objects and tmp_path fixtures. Coverage focuses on the
+highest-stakes and most recently-hardened logic:
+
+- **Self-healing's safety guards** (`tests/test_healer.py`): the AST
+  patch validator (rejects invalid syntax, rejects a patch that drops a
+  required function), the backup-before-write apply step and rollback,
+  and the NotHealable fast path that skips a doomed LLM call for
+  exceptions outside transforms.py's scope. Every test monkeypatches
+  `TRANSFORMS_PATH` to a tmp file -- none of them touch the real
+  `app/cleaning/transforms.py`.
+- **Schema/cleaning "flag, never drop" contract**
+  (`tests/test_schema.py`, `test_transforms.py`, `test_features.py`):
+  first_name/last_name/email/phone_e164/consent all degrade gracefully
+  (to `None` or a safe default) instead of raising, no matter how dirty
+  the input -- locks in the fix for a real external-review finding (see
+  Limitations).
+- **Dedup's exact-match design** (`tests/test_dedup.py`): merges on
+  exact email/phone identity, and explicitly proves the false-positive
+  case that got fuzzy name matching removed (`fuzz.ratio("jon li", "jan
+  li")` and `fuzz.ratio("mohammed ali", "muhammad ali")` are both 83.3 --
+  two different people must never merge just because their names look
+  alike).
+
 ## Data
 
 `data/sample_pack/` is a committed, deterministic ~100,000-row synthetic
@@ -176,7 +206,7 @@ duplicates). This is what `scripts/replay.py` ingests and what the demo
 video runs against.
 
 `data/raw/` is a gitignored scratch space for generating your *own* fresh
-messy dataset on demand: `python -m scripts.generate_data --total 50000`.
+messy dataset on demand: `python3 -m scripts.generate_data --total 50000`.
 
 ## Fine-tune notes
 
@@ -209,9 +239,9 @@ Two things stand in for fine-tuning instead:
 
 ## Demo walkthrough
 
-1. **Load messy data**: `python -m scripts.replay` ingests the committed
+1. **Load messy data**: `python3 -m scripts.replay` ingests the committed
    `data/sample_pack/` (or generate your own fresh batch first with
-   `python -m scripts.generate_data --total 50000 --out-dir data/raw`,
+   `python3 -m scripts.generate_data --total 50000 --out-dir data/raw`,
    which produces inconsistent phone formats, malformed emails, missing
    fields, and cross-source duplicates).
 2. **Show clean output**: open the dashboard, or `GET /leads`, to see the
@@ -219,7 +249,7 @@ Two things stand in for fine-tuning instead:
    field carries the exact original messy input alongside the cleaned
    canonical fields, so a single row shows one lead's full journey --
    messy source dict in, canonical Postgres row out -- side by side.
-3. **Break the schema intentionally**: `python -m scripts.demo_self_heal`
+3. **Break the schema intentionally**: `python3 -m scripts.demo_self_heal`
    patches `app/cleaning/transforms.py` with a bug (phone normalization
    stops casting input to `str`), then feeds it a batch with an integer
    phone number to trigger a real, uncaught `TypeError`.
@@ -233,7 +263,7 @@ Two things stand in for fine-tuning instead:
    the union-find clustering in `app/deduplication/dedup.py` show
    cross-source duplicate detection on exact email/phone match (see
    Limitations for why this is exact-match only, not fuzzy name matching).
-6. **Show scoring**: `python -m ml.train` trains the XGBoost model on
+6. **Show scoring**: `python3 -m ml.train` trains the XGBoost model on
    bootstrapped rule-based pseudo-labels (see Limitations); afterward,
    `/leads` and the dashboard's score histogram reflect the trained
    model instead of the raw rule-based fallback. MLflow at
@@ -241,6 +271,28 @@ Two things stand in for fine-tuning instead:
 
 ## Limitations and future work
 
+- **The schema used to violate its own brief -- fixed.** An external
+  review found `first_name`/`last_name`/`email`/`phone_e164`/`consent`
+  hard-required on the `Lead` model, so any lead with one bad field
+  (a junk phone number, a malformed email, a missing name) was rejected
+  to `invalid_leads` wholesale instead of being flagged -- on one real
+  Facebook sample batch, 238 of 393 leads (60%) were silently dropped
+  this way, the majority from `normalize_phone` rejecting NANP's 555
+  exchange (exactly what Faker generates for synthetic phone numbers).
+  The brief is explicit that a lead a business paid for is never deleted
+  for having dirty data. Fixed: those four fields are now nullable (plus
+  `created_at`, which defaults to now() instead of failing), missing/
+  ambiguous consent defaults to `False` (TCPA-safe) instead of `None`,
+  `normalize_phone` now accepts anything `is_possible_number` instead of
+  the stricter `is_valid_number`, and a lead with no contactable
+  identifier at all (no email *and* no phone) is flagged rather than
+  silently treated as a normal clean record. See `tests/test_schema.py`,
+  `test_transforms.py`, and `test_features.py` for the regression
+  coverage locking this in. What still legitimately lands in
+  `invalid_leads` is now a much narrower set -- structural failures
+  Pydantic can't gracefully coerce around (e.g. a `source` value outside
+  the known enum, or a name/string field past its length limit) -- rather
+  than "any single field was dirty."
 - **Cross-batch dedup's race protection is Postgres-only.** A QA audit
   found concurrent requests for the same lead could each see "not found"
   and each insert their own "clean" row (confirmed with 20 real threads:

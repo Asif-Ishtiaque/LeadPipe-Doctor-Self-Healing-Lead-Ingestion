@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from email_validator import EmailNotValidError, validate_email
+from pydantic import BaseModel, Field, field_validator
 
 
 def _is_mostly_letters(value: str) -> bool:
@@ -34,27 +35,42 @@ class LeadSource(str, Enum):
 
 
 class LeadStatus(str, Enum):
-    # A Lead object only ever exists once it's passed Pydantic validation
-    # (a row that fails validation never becomes a Lead -- it's stored as
-    # a raw dict in invalid_leads instead, see app/validation/validator.py),
-    # so status only ever needs to distinguish three outcomes from there:
+    # The brief is explicit that a lead a business paid for is never
+    # deleted for having dirty data -- every row that makes it through
+    # ingestion becomes a Lead, no matter how incomplete. status is what
+    # distinguishes a usable record from one worth a human's attention:
     CLEAN = "clean"  # passed validation, no quality concerns
-    FLAGGED = "flagged"  # passed validation, but scoring found a quality concern
-    # (disposable email domain, placeholder/keyboard-mash name, etc. --
-    # see app/agent/pipeline.py) worth a human's attention before treating
-    # it like a normal lead
+    FLAGGED = "flagged"  # missing/malformed required-ish data (name, email,
+    # phone), or a quality concern found by scoring (disposable email
+    # domain, placeholder/keyboard-mash name, placeholder phone, no
+    # contactable identifier at all) -- see app/agent/pipeline.py
     DUPLICATE = "duplicate"  # merged into another kept lead, see app/deduplication
+    # A row that's structurally unusable (see app/validation/validator.py
+    # for the now very narrow set of things that still qualify) never
+    # becomes a Lead at all -- it's stored as a raw dict in invalid_leads
+    # instead, so there's no LeadStatus for that outcome.
 
 
 class Lead(BaseModel):
     lead_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    first_name: str = Field(min_length=1, max_length=100)
-    last_name: str = Field(min_length=1, max_length=100)
-    email: EmailStr
-    phone_e164: str = Field(pattern=r"^\+[1-9]\d{6,14}$")
+    # first_name/last_name/email/phone_e164/consent are all nullable per
+    # the brief's own schema -- a lead with a junk phone number, a
+    # malformed email, or a missing name is still a lead a business paid
+    # for. It gets flagged (see _flag_quality_concerns in
+    # app/agent/pipeline.py) and scored low (has_first_name/has_email/etc
+    # in app/scoring/features.py already treat a missing field as a
+    # quality signal, not a rejection reason) -- never dropped.
+    first_name: Optional[str] = Field(default=None, max_length=100)
+    last_name: Optional[str] = Field(default=None, max_length=100)
+    email: Optional[str] = None
+    phone_e164: Optional[str] = Field(default=None, pattern=r"^\+[1-9]\d{6,14}$")
     source: LeadSource
     campaign_id: Optional[str] = None
-    consent: bool
+    # Missing/unparseable consent defaults to False (TCPA-safe: silence is
+    # never treated as opt-in) rather than being required -- see
+    # app/cleaning/transforms.py:normalize_consent, which now always
+    # returns a bool.
+    consent: bool = False
     created_at: datetime
     quality_score: Optional[float] = Field(default=None, ge=0, le=100)
     status: LeadStatus = LeadStatus.CLEAN
@@ -64,6 +80,26 @@ class Lead(BaseModel):
     duplicate_of_lead_id: Optional[str] = None
     raw_payload: dict[str, Any] = Field(default_factory=dict)
 
+    @field_validator("consent", mode="before")
+    @classmethod
+    def default_missing_consent(cls, v: Any) -> Any:
+        # app/cleaning/transforms.py:normalize_consent already does this
+        # in the real pipeline (and handles the phrase-parsing) -- this
+        # is the same defense-in-depth backstop as the email/name
+        # validators above, for any caller that constructs a Lead
+        # directly without going through cleaning first.
+        return False if v is None else v
+
+    @field_validator("created_at", mode="before")
+    @classmethod
+    def default_missing_timestamp(cls, v: Any) -> Any:
+        # parse_datetime_utc returns None for an unparseable/missing
+        # source timestamp -- same "never drop for dirty data" policy as
+        # every other field, just with "now" as the sane default instead
+        # of None, since sorting/tiebreaking (app/deduplication/dedup.py)
+        # needs a real, comparable datetime.
+        return v if v is not None else datetime.now(timezone.utc)
+
     @field_validator("created_at")
     @classmethod
     def ensure_utc(cls, v: datetime) -> datetime:
@@ -71,12 +107,35 @@ class Lead(BaseModel):
             return v.replace(tzinfo=timezone.utc)
         return v.astimezone(timezone.utc)
 
-    @field_validator("first_name", "last_name")
+    @field_validator("first_name", "last_name", mode="before")
     @classmethod
-    def reject_non_alphabetic_junk(cls, v: str) -> str:
-        if not _is_mostly_letters(v):
-            raise ValueError("name must be mostly letters -- got mostly non-alphabetic characters (e.g. emoji/symbols)")
-        return v
+    def null_out_non_alphabetic_junk(cls, v: Any) -> Any:
+        # A keyboard-mash/emoji-only "name" isn't usable data, but it's
+        # not a reason to drop the whole lead either -- treat it the same
+        # as a genuinely missing name (None), which the scoring layer
+        # already penalizes via has_first_name/has_last_name and
+        # name_is_placeholder_like, and _flag_quality_concerns marks
+        # FLAGGED rather than silently keeping it as a fake-looking clean
+        # lead.
+        if v is None or not isinstance(v, str):
+            return v
+        return v if _is_mostly_letters(v) else None
+
+    @field_validator("email", mode="before")
+    @classmethod
+    def normalize_or_null_email(cls, v: Any) -> Any:
+        # app/cleaning/transforms.py:normalize_email already normalizes
+        # (or nulls out) email before it reaches here in the real
+        # pipeline -- this is a defense-in-depth backstop for any other
+        # caller that constructs a Lead directly (tests, scripts), so an
+        # unparseable email degrades to "no email on file" instead of
+        # rejecting the entire lead.
+        if v is None:
+            return None
+        try:
+            return validate_email(str(v), check_deliverability=False).normalized.lower()
+        except EmailNotValidError:
+            return None
 
     class Config:
         use_enum_values = True

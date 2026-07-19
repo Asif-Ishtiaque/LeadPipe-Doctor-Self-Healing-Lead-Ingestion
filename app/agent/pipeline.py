@@ -77,10 +77,23 @@ def _flag_quality_concerns(leads: list[Lead]) -> None:
     name isn't invalid data, just suspect data. Marks those `flagged`
     in place instead of leaving them indistinguishable from a genuine
     clean lead (both already scored low by app/scoring, but the status
-    makes the reason visible without having to inspect the score)."""
+    makes the reason visible without having to inspect the score).
+
+    Also flags a lead with neither email nor phone at all -- the schema
+    allows both to be null rather than reject the lead outright (a
+    business paid for it even if the form submission was junk), but a
+    lead with no way to ever be contacted is the most severe version of
+    "worth a second look," not a normal clean record."""
     for lead in leads:
         features = build_features(lead)
-        if features["email_is_disposable"] or features["email_is_placeholder_like"] or features["name_is_placeholder_like"]:
+        no_contact_info = not lead.email and not lead.phone_e164
+        if (
+            features["email_is_disposable"]
+            or features["email_is_placeholder_like"]
+            or features["name_is_placeholder_like"]
+            or features["phone_is_placeholder"]
+            or no_contact_info
+        ):
             lead.status = LeadStatus.FLAGGED
 
 
@@ -108,7 +121,11 @@ def _dedup_against_existing(kept: list[Lead], duplicates: list[Lead]) -> tuple[l
 
     still_new: list[Lead] = []
     for lead in kept:
-        match = existing.get(f"email:{lead.email.lower()}") or existing.get(f"phone:{lead.phone_e164}")
+        match = None
+        if lead.email:
+            match = existing.get(f"email:{lead.email.lower()}")
+        if not match and lead.phone_e164:
+            match = existing.get(f"phone:{lead.phone_e164}")
         if match:
             lead.status = "duplicate"
             lead.duplicate_of_lead_id = match

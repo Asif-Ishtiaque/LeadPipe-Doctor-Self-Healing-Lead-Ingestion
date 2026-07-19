@@ -26,23 +26,35 @@ class LeadScorer:
         if self._model is None:
             return rule_based_score(lead)
         vector = features_to_vector(build_features(lead))
-        predicted = float(self._model.predict([vector])[0])
+        try:
+            predicted = float(self._model.predict([vector])[0])
+        except Exception:
+            # Most likely a stale model trained against an older
+            # FEATURE_NAMES shape (e.g. a feature added/removed since it
+            # was last trained) -- the docstring's promise that scoring
+            # never blocks the pipeline wasn't actually enforced here
+            # before; a shape mismatch would raise straight out of
+            # predict() and take the whole batch down with it.
+            return rule_based_score(lead)
         return max(0.0, min(100.0, predicted))
 
     def score_batch(self, leads: list) -> list:
         if not leads:
             return leads
-        if self._model is None:
-            for lead in leads:
-                lead.quality_score = round(rule_based_score(lead), 2)
-            return leads
-
-        # One matrix, one predict() call -- calling predict() per-row in a
-        # loop was measured taking 3.5s for 25k leads purely from
-        # per-call overhead; XGBoost (like most sklearn-style models) is
-        # built for vectorized batch prediction, not one-row-at-a-time.
-        vectors = [features_to_vector(build_features(lead)) for lead in leads]
-        predictions = self._model.predict(vectors)
-        for lead, predicted in zip(leads, predictions):
-            lead.quality_score = round(max(0.0, min(100.0, float(predicted))), 2)
+        if self._model is not None:
+            # One matrix, one predict() call -- calling predict() per-row
+            # in a loop was measured taking 3.5s for 25k leads purely
+            # from per-call overhead; XGBoost (like most sklearn-style
+            # models) is built for vectorized batch prediction, not
+            # one-row-at-a-time.
+            vectors = [features_to_vector(build_features(lead)) for lead in leads]
+            try:
+                predictions = self._model.predict(vectors)
+                for lead, predicted in zip(leads, predictions):
+                    lead.quality_score = round(max(0.0, min(100.0, float(predicted))), 2)
+                return leads
+            except Exception:
+                pass  # fall through to rule-based below -- see score()'s comment
+        for lead in leads:
+            lead.quality_score = round(rule_based_score(lead), 2)
         return leads
