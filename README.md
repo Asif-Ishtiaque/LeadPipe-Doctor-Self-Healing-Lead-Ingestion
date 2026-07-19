@@ -310,7 +310,7 @@ Two things stand in for fine-tuning instead:
   Alembic (or equivalent) here. Fine for a project at this stage; a real
   production deployment would want proper migrations.
 
-##Screenshots:
+## Screenshots:
   <img width="2878" height="1616" alt="image" src="https://github.com/user-attachments/assets/0df8fd49-6db9-4d6d-bff8-fdf6644570a4" />
   <img width="2878" height="1620" alt="image" src="https://github.com/user-attachments/assets/e771d822-9586-4c0b-ac92-8f188808c61a" />
   <img width="2878" height="1612" alt="image" src="https://github.com/user-attachments/assets/d86c42c3-1ff2-4edf-9511-43dc69e8d3f0" />
