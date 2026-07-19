@@ -207,9 +207,6 @@ Two things stand in for fine-tuning instead:
 
 [link to demo video -- add once recorded/uploaded]
 
-Recording notes and the shot-by-shot script are in
-[`docs/DEMO_SCRIPT.md`](docs/DEMO_SCRIPT.md).
-
 ## Demo walkthrough
 
 1. **Load messy data**: `python -m scripts.replay` ingests the committed

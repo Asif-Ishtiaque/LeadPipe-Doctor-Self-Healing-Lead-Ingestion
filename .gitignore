@@ -18,3 +18,4 @@ chroma_persist/
 *.bak
 *.demo_backup
 .env
+docs/DEMO_SCRIPT.md
