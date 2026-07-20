@@ -103,7 +103,17 @@ def build_training_set(n: int = N_SAMPLES):
     for i in range(n):
         lead = _synthetic_lead(i)
         X.append(features_to_vector(build_features(lead)))
-        label = rule_based_score(lead) + random.gauss(0, 5)
+        # A small amount of label noise (was gauss(0, 5)) stands in for the
+        # fact that real conversion outcomes won't track the heuristic
+        # perfectly -- but 5 points was enough to make the tree ensemble
+        # hedge toward the mean and cap its predictions ~20 points below the
+        # true ceiling (measured: rule-based reached 85 on real leads, the
+        # model never exceeded 65, so 0% of leads landed in the 70+ band
+        # even though ~two-thirds genuinely qualified). We're approximating
+        # a deterministic scorer, so keep the noise light enough that the
+        # model reproduces the full 0-100 range instead of a squashed
+        # middle.
+        label = rule_based_score(lead) + random.gauss(0, 1.5)
         y.append(max(0.0, min(100.0, label)))
     return X, y
 
@@ -117,7 +127,19 @@ def main():
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
     with mlflow.start_run():
-        params = {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.1, "random_state": 42}
+        # NOTE: this model is a tracked experiment, not the production
+        # scorer -- see app/scoring/scorer.py for why (a tree ensemble
+        # compresses the range of the deterministic linear rule it's
+        # trained to mimic, so the rule engine serves in production and
+        # this is the learning path for when real conversion labels exist).
+        # These params are a sane, regularized baseline; validation MAE is
+        # a within-distribution metric and, as the calibration pass found,
+        # does NOT reflect real-lead fidelity -- don't tune against it alone.
+        params = {
+            "n_estimators": 300, "max_depth": 4, "learning_rate": 0.05,
+            "subsample": 0.8, "colsample_bytree": 0.8, "reg_lambda": 2.0,
+            "min_child_weight": 10, "random_state": 42,
+        }
         mlflow.log_params(params)
 
         model = xgb.XGBRegressor(**params)

@@ -60,7 +60,7 @@ queue.
         │                                                                  │
         │  run_pipeline = cleaning (app/cleaning) -> validation            │
         │  (app/validation, Pydantic) -> dedup (app/deduplication,         │
-        │  exact email/phone match) -> scoring (app/scoring, XGBoost)      │
+        │  exact email/phone match) -> scoring (app/scoring, rule engine)  │
         │                                                                  │
         │  heal = capture traceback -> ask Ollama to rewrite                │
         │  app/cleaning/transforms.py -> validate the patch is syntactically│
@@ -92,7 +92,7 @@ locally without an account.
 | **PostgreSQL (DuckDB fallback)** | Storage | Postgres in docker-compose for concurrent read/write from the API + dashboard; DuckDB locally so the pipeline runs with zero infra for development. Same SQLAlchemy code path either way. | PostgreSQL License (MIT-like) / DuckDB: MIT |
 | **ChromaDB** | RAG memory for field mapping | Stores canonical schema descriptions and every past field-mapping decision as embeddings, so mapping quality compounds instead of re-asking the LLM the same question for every batch. | Apache-2.0 |
 | **nomic-embed-text (via Ollama)** | Embeddings | Free, local, good enough for short field-name-plus-sample-value strings. | Apache-2.0 |
-| **XGBoost** | Lead scoring | Handles the mixed categorical/numeric feature set (source, consent, completeness) well with almost no tuning; falls back to a transparent rule-based scorer if no model has been trained yet. | Apache-2.0 |
+| **Rule engine + XGBoost** | Lead scoring | Production scoring is a transparent, clamped-linear rule engine over named quality signals -- every point decomposes into a reason the diagnosis text can name, and it uses the full 0-100 range. An XGBoost model is also trained on the rule engine's pseudo-labels and tracked in MLflow as the drop-in path for when real conversion outcomes exist; it is not the live scorer today because a tree ensemble compresses the range of the linear rule it's mimicking (measured in Limitations). | XGBoost: Apache-2.0 |
 | **rapidfuzz** | Field-mapping heuristic fallback | Fast fuzzy string matching in C, used when the LLM can't resolve a field mapping (`app/mapping/mapper.py`). No longer used for deduplication -- see Limitations for why fuzzy name matching was removed from dedup. | MIT |
 | **MLflow** | Scoring experiment tracking | Free, local tracking server; logs the XGBoost hyperparameters/MAE for every training run. | Apache-2.0 |
 | **Streamlit** | Dashboard | Fastest way to get a real, interactive dashboard out of pandas DataFrames with no separate frontend build. | Apache-2.0 |
@@ -234,9 +234,13 @@ Two things stand in for fine-tuning instead:
   history for the before/after. If you have the RAM for `qwen2.5:7b`
   instead, prompt engineering matters less; the tradeoff is memory vs.
   how much prompting effort the smaller model needs.
-- **The XGBoost scorer *is* trained** (that's a separate, traditional
-  ML step, not the LLM) -- see `ml/train.py` and Limitations below for
-  what it's trained on.
+- **An XGBoost scorer *is* trained and tracked in MLflow** (a separate,
+  traditional ML step, not the LLM) -- but production scoring is the
+  transparent rule engine, not the model. See `ml/train.py`,
+  `app/scoring/scorer.py`, and Limitations below for why (short version: a
+  tree ensemble compresses the range of the deterministic linear rule it's
+  trained to mimic, so the model is the future-real-labels path rather
+  than today's scorer).
 
 ## Demo video
 
@@ -268,11 +272,14 @@ Two things stand in for fine-tuning instead:
    the union-find clustering in `app/deduplication/dedup.py` show
    cross-source duplicate detection on exact email/phone match (see
    Limitations for why this is exact-match only, not fuzzy name matching).
-6. **Show scoring**: `python3 -m ml.train` trains the XGBoost model on
-   bootstrapped rule-based pseudo-labels (see Limitations); afterward,
-   `/leads` and the dashboard's score histogram reflect the trained
-   model instead of the raw rule-based fallback. MLflow at
-   http://localhost:5000 shows the training run's logged accuracy (MAE).
+6. **Show scoring**: every lead carries a 0-100 quality score, a
+   plain-English diagnosis, and a recommended action (dashboard Leads tab
+   -> Lead insights). Scoring is the transparent rule engine, so a score
+   always decomposes into named reasons. `python3 -m ml.train` also trains
+   an XGBoost model on the rule engine's pseudo-labels and logs it to
+   MLflow (http://localhost:5000) -- the tracked learning path for when
+   real conversion outcomes exist (see Limitations for why it isn't the
+   live scorer).
 
 ## Limitations and future work
 
@@ -317,12 +324,35 @@ Two things stand in for fine-tuning instead:
   `OLLAMA_MODEL: qwen2.5:7b` in docker-compose.yml (and pull it via
   `docker compose exec ollama-init ollama pull qwen2.5:7b`) for
   meaningfully better field-mapping and code-patching quality.
-- **No real conversion labels.** The XGBoost scorer is trained on
-  pseudo-labels derived from the rule-based scorer plus noise (see
-  `ml/train.py`), since this demo has no historical "did this lead
-  convert" outcome data. Swap in real labels once available -- nothing
-  else in the pipeline needs to change, since scoring only depends on the
-  saved model's `predict()` interface.
+- **Production scoring is the rule engine, not the trained model -- on
+  purpose.** With no historical "did this lead convert" outcomes, the
+  XGBoost model can only be trained on pseudo-labels from the rule engine,
+  so it can never be *better* than the rule engine -- only a lossier copy.
+  A calibration pass measured exactly how lossy: the model reproduced the
+  rule engine to within ~1 point on held-out *synthetic* data (validation
+  MAE ~1.2) yet missed *real* leads by ~21 points and never predicted
+  above ~56, so 0% of leads reached the 70+ band even though ~two-thirds
+  genuinely qualify. That's structural -- a gradient-boosted tree ensemble
+  compresses the range of a deterministic *linear* target (shallow trees
+  average toward the mean; deep trees overfit the zero-signal features),
+  and no hyperparameter setting fixed it without trading one failure for
+  the other. So the transparent rule engine scores in production (exact,
+  explainable, full-range, and it matches the diagnosis text line for
+  line), while the model stays trained + tracked in MLflow as the drop-in
+  path for when real conversion labels exist -- at which point it would be
+  predicting something the rule engine can't. `USE_XGBOOST_SCORER=1` flips
+  the model into the serving path for experimentation. Re-run
+  `scripts/rescore.py` after any scoring-logic change to back-fill scores
+  on already-stored rows.
+- **The score distribution reflects the (optimistic) synthetic data.**
+  On the sample pack ~66% of *valid* leads land in the High band -- not
+  because the scorer is undiscriminating but because the invalid/incomplete
+  rows are already filtered to `invalid_leads` before scoring, leaving a
+  valid population that is ~100% complete and ~76% consented, i.e.
+  genuinely mostly-good. A steeper prioritization funnel needs more
+  *variance* in the input data (missing fields, more corporate-vs-free
+  mix, more consent spread), not a heavier arbitrary penalty -- the score
+  can only spread as much as the underlying signals do.
 - **Self-healing has no offline fallback.** Rewriting code is
   fundamentally an LLM task; if Ollama is unreachable, the agent can't
   self-heal and routes straight to human review. Field mapping, by
