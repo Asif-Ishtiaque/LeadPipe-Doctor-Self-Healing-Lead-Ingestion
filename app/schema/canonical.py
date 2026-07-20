@@ -60,8 +60,13 @@ class Lead(BaseModel):
     # app/agent/pipeline.py) and scored low (has_first_name/has_email/etc
     # in app/scoring/features.py already treat a missing field as a
     # quality signal, not a rejection reason) -- never dropped.
-    first_name: Optional[str] = Field(default=None, max_length=100)
-    last_name: Optional[str] = Field(default=None, max_length=100)
+    # No max_length constraint here on purpose: a length cap that *rejects*
+    # is one more way to drop a real lead (a QA pass fed a 5000-char name
+    # and the whole lead went to invalid_leads). The before-validator below
+    # truncates to a sane cap instead of rejecting -- coerce, don't drop,
+    # same as every other field.
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
     email: Optional[str] = None
     phone_e164: Optional[str] = Field(default=None, pattern=r"^\+[1-9]\d{6,14}$")
     source: LeadSource
@@ -71,7 +76,18 @@ class Lead(BaseModel):
     # app/cleaning/transforms.py:normalize_consent, which now always
     # returns a bool.
     consent: bool = False
-    created_at: datetime
+    # default_factory (not just the before-validator below) is load-bearing:
+    # a Pydantic v2 mode="before" validator does NOT fire when the field
+    # key is absent from the input entirely -- only when a value (even
+    # None) is explicitly provided. Without a default, a lead whose source
+    # simply omits a timestamp -- or whose "ts" field the mapper didn't
+    # resolve -- fails with "Field required" and gets dropped, which a QA
+    # pass caught silently violating the whole "never drop a paid-for
+    # lead" contract (a Grace-Hopper-grade lead with a .mil email and a
+    # real phone, thrown away purely for having no timestamp). The
+    # factory covers the absent-key case; the before-validator below
+    # still covers the explicit-None / unparseable-value cases.
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     quality_score: Optional[float] = Field(default=None, ge=0, le=100)
     status: LeadStatus = LeadStatus.CLEAN
     # Populated when status == "duplicate": which kept lead this one was
@@ -119,7 +135,11 @@ class Lead(BaseModel):
         # lead.
         if v is None or not isinstance(v, str):
             return v
-        return v if _is_mostly_letters(v) else None
+        if not _is_mostly_letters(v):
+            return None
+        # Truncate rather than reject an over-long name (see the field
+        # definition above) -- 100 chars comfortably fits any real name.
+        return v[:100]
 
     @field_validator("email", mode="before")
     @classmethod

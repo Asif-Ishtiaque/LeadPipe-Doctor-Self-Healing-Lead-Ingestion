@@ -64,6 +64,33 @@ def test_missing_created_at_defaults_to_a_real_utc_datetime_not_none():
     assert lead.created_at.tzinfo == timezone.utc
 
 
+def test_created_at_key_absent_entirely_does_not_reject_the_lead():
+    """Regression: a Pydantic v2 mode='before' validator does NOT fire for
+    a field whose key is absent from the input -- only when a value is
+    explicitly passed. A QA pass found this silently dropping any lead
+    whose source omits a timestamp (or whose 'ts' field the mapper didn't
+    resolve) to invalid_leads, violating the never-drop contract. The
+    default_factory on created_at is what actually covers the absent-key
+    case."""
+    lead = Lead(
+        source=LeadSource.FACEBOOK,
+        first_name="Grace",
+        last_name="Hopper",
+        email="grace@navy.mil",
+        phone_e164="+12026750143",
+        consent=True,
+        # created_at deliberately not passed at all
+    )
+    assert isinstance(lead.created_at, datetime)
+    assert lead.created_at.tzinfo == timezone.utc
+
+
+def test_over_long_name_is_truncated_not_rejected():
+    lead = _lead(first_name="A" * 5000, last_name="Hamilton")
+    assert lead.first_name == "A" * 100
+    assert lead.last_name == "Hamilton"
+
+
 def test_junk_unicode_name_is_nulled_out_not_rejected():
     lead = _lead(first_name="\U0001F602\U0001F602\U0001F602", last_name="normal")
     assert lead.first_name is None
