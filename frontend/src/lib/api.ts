@@ -15,8 +15,20 @@ export const api = {
 
   // SQL-aggregated metrics for every chart/KPI — a few KB, not the whole table.
   analytics: () => get<Analytics>("/analytics"),
-  topLeads: (limit = 8, source?: string) =>
-    get<Lead[]>(`/leads/top?limit=${limit}${source ? `&source=${encodeURIComponent(source)}` : ""}`),
+  topLeads: (limit = 8, opts?: { source?: string; minScore?: number; maxScore?: number }) => {
+    const p = new URLSearchParams({ limit: String(limit) });
+    if (opts?.source) p.set("source", opts.source);
+    if (opts?.minScore != null) p.set("min_score", String(opts.minScore));
+    if (opts?.maxScore != null) p.set("max_score", String(opts.maxScore));
+    return get<Lead[]>(`/leads/top?${p.toString()}`);
+  },
+  rankedLeads: (limit = 10, offset = 0, opts?: { source?: string; minScore?: number; maxScore?: number }) => {
+    const p = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (opts?.source) p.set("source", opts.source);
+    if (opts?.minScore != null) p.set("min_score", String(opts.minScore));
+    if (opts?.maxScore != null) p.set("max_score", String(opts.maxScore));
+    return get<LeadSearchResult>(`/leads/ranked?${p.toString()}`);
+  },
   searchLeads: (q: string, limit = 200, source?: string) =>
     get<LeadSearchResult>(
       `/leads/search?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ""}${source ? `&source=${encodeURIComponent(source)}` : ""}`,

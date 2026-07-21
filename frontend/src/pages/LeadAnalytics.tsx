@@ -1,14 +1,38 @@
-import { useMemo } from "react";
-import { useAnalytics, useTopLeads } from "../hooks/queries";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useAnalytics, useRankedLeads } from "../hooks/queries";
 import { Avatar, Panel, StatCard } from "../components/ui";
 import { AvgBySource, ScoreHistogram, SignalRadar, type RadarSeries } from "../components/charts";
 import { avgBySource, buildRadar, buildScoreHistogram, funnel, metricsFor } from "../lib/derive";
 import { bandColor, COLORS, initials, leadName, num, prettySource } from "../lib/format";
 
+// Score-range presets for the call-list filter (label -> [min, max]).
+const SCORE_RANGES: Record<string, [number | undefined, number | undefined]> = {
+  "All scores": [undefined, undefined],
+  "High · 70–100": [70, 100],
+  "Medium · 40–69": [40, 69],
+  "Low · 0–39": [0, 39],
+};
+
+const PAGE_SIZE = 10;
+
 export default function LeadAnalytics() {
   const { data: a, isError } = useAnalytics();
-  const topQ = useTopLeads(8);
-  const top = topQ.data ?? [];
+  const [fSource, setFSource] = useState<string>("");
+  const [fRange, setFRange] = useState<string>("All scores");
+  const [page, setPage] = useState(0);
+  const [fMin, fMax] = SCORE_RANGES[fRange] ?? [undefined, undefined];
+
+  // Any filter change resets to the first page.
+  useEffect(() => setPage(0), [fSource, fRange]);
+
+  const rankedQ = useRankedLeads(PAGE_SIZE, page * PAGE_SIZE, {
+    source: fSource || undefined,
+    minScore: fMin,
+    maxScore: fMax,
+  });
+  const top = rankedQ.data?.rows ?? [];
+  const totalLeads = rankedQ.data?.total ?? 0;
+  const pageCount = Math.max(1, Math.ceil(totalLeads / PAGE_SIZE));
 
   const m = useMemo(() => (a ? metricsFor(a) : null), [a]);
   const fun = useMemo(() => (a ? funnel(a) : { high: 0, medium: 0, low: 0 }), [a]);
@@ -53,7 +77,23 @@ export default function LeadAnalytics() {
         </Panel>
       </div>
 
-      <Panel title="Top leads to work now" cap="Highest-scoring leads in view — your call list.">
+      <Panel
+        title="Top leads to work now"
+        cap="Highest-scoring leads in view — your call list."
+        action={
+          <div className="flex items-center gap-2">
+            <Filter value={fSource} onChange={setFSource}>
+              <option value="">All sources</option>
+              {Object.keys(a.by_source).sort().map((s) => (
+                <option key={s} value={s}>{prettySource(s)}</option>
+              ))}
+            </Filter>
+            <Filter value={fRange} onChange={setFRange}>
+              {Object.keys(SCORE_RANGES).map((r) => <option key={r} value={r}>{r}</option>)}
+            </Filter>
+          </div>
+        }
+      >
         <table className="w-full text-[0.85rem]">
           <thead><tr className="text-[0.68rem] uppercase tracking-wide text-faint">
             <th className="text-left pb-2.5 font-bold">Name</th><th className="text-left pb-2.5 font-bold">Source</th>
@@ -67,10 +107,50 @@ export default function LeadAnalytics() {
                 <td className="py-2.5 pl-4 text-muted max-w-[340px]">{l.diagnosis ?? "—"}</td>
               </tr>
             ))}
+            {top.length === 0 && (
+              <tr><td colSpan={4} className="py-4 text-muted text-center">No leads match this filter.</td></tr>
+            )}
           </tbody>
         </table>
+
+        {totalLeads > 0 && (
+          <div className="flex items-center justify-between mt-4 pt-3 border-t border-line text-[0.82rem]">
+            <span className="text-muted tnum">
+              Showing {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, totalLeads)} of {num(totalLeads)}
+            </span>
+            <div className="flex items-center gap-2">
+              <PageBtn disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Previous</PageBtn>
+              <span className="text-muted tnum px-1">Page {page + 1} of {pageCount}</span>
+              <PageBtn disabled={page >= pageCount - 1} onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}>Next</PageBtn>
+            </div>
+          </div>
+        )}
       </Panel>
     </div>
+  );
+}
+
+function PageBtn({ disabled, onClick, children }: { disabled: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      disabled={disabled}
+      onClick={onClick}
+      className="px-3 py-1.5 rounded-lg border border-line2 font-semibold text-ink bg-panel transition-colors hover:border-brand hover:text-brand disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-line2 disabled:hover:text-ink"
+    >
+      {children}
+    </button>
+  );
+}
+
+function Filter({ value, onChange, children }: { value: string; onChange: (v: string) => void; children: ReactNode }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="border border-line2 rounded-lg px-2.5 py-1.5 text-[0.8rem] font-semibold text-ink bg-panel outline-none cursor-pointer hover:border-brand focus:border-brand"
+    >
+      {children}
+    </select>
   );
 }
 

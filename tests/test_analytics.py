@@ -78,6 +78,50 @@ def test_top_leads_sorted_desc_capped_and_no_raw_payload(fresh_db):
     assert "raw_payload" not in top[0]  # the big field is deliberately excluded
 
 
+def test_top_leads_filters_by_source_and_score_range(fresh_db):
+    storage.save_leads([
+        _lead(source=LeadSource.FACEBOOK, email="f1@x.com", phone_e164="+14155550020", quality_score=85.0),
+        _lead(source=LeadSource.FACEBOOK, email="f2@x.com", phone_e164="+14155550021", quality_score=55.0),
+        _lead(source=LeadSource.FACEBOOK, email="f3@x.com", phone_e164="+14155550022", quality_score=20.0),
+        _lead(source=LeadSource.INSTAGRAM, email="i1@x.com", phone_e164="+14155550023", quality_score=60.0),
+    ])
+
+    # source filter only
+    fb = storage.top_leads(limit=10, source="facebook")
+    assert {r["email"] for r in fb} == {"f1@x.com", "f2@x.com", "f3@x.com"}
+
+    # source + score range (40..69) -> only the facebook lead scoring 55
+    band = storage.top_leads(limit=10, source="facebook", min_score=40, max_score=69)
+    assert [r["email"] for r in band] == ["f2@x.com"]
+
+    # score range across all sources (>=60) -> 85 and 60, highest first
+    hi = storage.top_leads(limit=10, min_score=60)
+    assert [r["quality_score"] for r in hi] == [85.0, 60.0]
+
+
+def test_ranked_leads_paginates_and_reports_total(fresh_db):
+    storage.save_leads([
+        _lead(email=f"{i}@x.com", phone_e164=f"+1415555{i:04d}", quality_score=float(90 - i))
+        for i in range(25)  # scores 90, 89, ..., 66
+    ])
+
+    p0 = storage.ranked_leads(limit=10, offset=0)
+    assert p0["total"] == 25
+    assert len(p0["rows"]) == 10
+    assert p0["rows"][0]["quality_score"] == 90.0  # highest first
+
+    p1 = storage.ranked_leads(limit=10, offset=10)
+    assert p1["rows"][0]["quality_score"] == 80.0  # page 2 continues the ranking
+
+    p2 = storage.ranked_leads(limit=10, offset=20)
+    assert len(p2["rows"]) == 5  # last partial page
+
+    # filters still apply, and total reflects the filtered set
+    band = storage.ranked_leads(limit=10, offset=0, min_score=85)
+    assert band["total"] == 6  # scores 90..85
+    assert all(r["quality_score"] >= 85 for r in band["rows"])
+
+
 def test_search_leads_filters_and_reports_true_total(fresh_db):
     storage.save_leads([
         _lead(first_name="Grace", last_name="Hopper", email="grace@x.com", phone_e164="+14155550010"),

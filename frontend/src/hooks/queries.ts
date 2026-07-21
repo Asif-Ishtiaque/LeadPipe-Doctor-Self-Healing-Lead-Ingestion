@@ -11,8 +11,29 @@ export const useStats = () => useQuery({ queryKey: ["stats"], queryFn: api.stats
 // into the browser to reduce them client-side.
 export const useAnalytics = () => useQuery({ queryKey: ["analytics"], queryFn: api.analytics, ...live });
 
-export const useTopLeads = (limit = 8, source?: string) =>
-  useQuery({ queryKey: ["top-leads", limit, source ?? "all"], queryFn: () => api.topLeads(limit, source), ...live });
+export const useTopLeads = (
+  limit = 8,
+  opts?: { source?: string; minScore?: number; maxScore?: number },
+) =>
+  useQuery({
+    queryKey: ["top-leads", limit, opts?.source ?? "all", opts?.minScore ?? "", opts?.maxScore ?? ""],
+    queryFn: () => api.topLeads(limit, opts),
+    ...live,
+  });
+
+// Paginated score-ranked call list. keepPreviousData holds the current page
+// on screen while the next one loads, so paging doesn't flash empty.
+export const useRankedLeads = (
+  limit: number,
+  offset: number,
+  opts?: { source?: string; minScore?: number; maxScore?: number },
+) =>
+  useQuery({
+    queryKey: ["ranked-leads", limit, offset, opts?.source ?? "all", opts?.minScore ?? "", opts?.maxScore ?? ""],
+    queryFn: () => api.rankedLeads(limit, offset, opts),
+    placeholderData: keepPreviousData,
+    ...live,
+  });
 
 // Debounced search string flows in as `q`. keepPreviousData avoids the table
 // flashing empty between keystrokes.

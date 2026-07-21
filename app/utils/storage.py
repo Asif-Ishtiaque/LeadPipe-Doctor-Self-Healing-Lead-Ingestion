@@ -3,6 +3,8 @@
 bare-metal for development -- both go through the same SQLAlchemy engine,
 so nothing else in the app needs to know which one is active."""
 
+from __future__ import annotations
+
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -321,36 +323,79 @@ _LEAD_VIEW_COLUMNS = (
 )
 
 
-def _lead_rows(where: str, params: dict, limit: int, order: str) -> list[dict]:
-    """Shared reader for the two lead-list endpoints (top / search). Selects
-    only the columns the UI renders -- explicitly *not* raw_payload, which is
-    by far the largest field and is what made a naive `SELECT *` of the whole
-    table a ~32 MB response. `where`/`order` are code-controlled fragments,
-    never user text; all user input arrives through bound `params`."""
+def _lead_rows(where: str, params: dict, limit: int, order: str, offset: int = 0) -> list[dict]:
+    """Shared reader for the lead-list endpoints (top / ranked / search).
+    Selects only the columns the UI renders -- explicitly *not* raw_payload,
+    which is by far the largest field and is what made a naive `SELECT *` of
+    the whole table a ~32 MB response. `where`/`order` are code-controlled
+    fragments, never user text; all user input arrives through bound `params`."""
     engine = get_engine()
     if not inspect(engine).has_table("leads"):
         return []
     try:
         with engine.connect() as conn:
             result = conn.execute(
-                text(f"SELECT {_LEAD_VIEW_COLUMNS} FROM leads WHERE {where} ORDER BY {order} LIMIT :limit"),
-                {**params, "limit": limit},
+                text(f"SELECT {_LEAD_VIEW_COLUMNS} FROM leads WHERE {where} ORDER BY {order} LIMIT :limit OFFSET :offset"),
+                {**params, "limit": limit, "offset": offset},
             )
             return [dict(row._mapping) for row in result]
     except Exception:
         return []
 
 
-def top_leads(limit: int = 8, source: str | None = None) -> list[dict]:
-    """Highest-scoring leads -- the "work these first" list. Ordering and the
-    row cap are pushed into SQL so only `limit` rows come back, instead of the
-    frontend pulling every lead and sorting client-side."""
+def _score_filter(
+    source: str | None, min_score: float | None, max_score: float | None
+) -> tuple[str, dict]:
+    """Shared WHERE fragment + bound params for the score-ordered lead lists
+    (top preview and paginated call list)."""
     where = "quality_score IS NOT NULL"
     params: dict = {}
     if source:
         where += " AND source = :source"
         params["source"] = source
+    if min_score is not None:
+        where += " AND quality_score >= :min_score"
+        params["min_score"] = min_score
+    if max_score is not None:
+        where += " AND quality_score <= :max_score"
+        params["max_score"] = max_score
+    return where, params
+
+
+def top_leads(
+    limit: int = 8,
+    source: str | None = None,
+    min_score: float | None = None,
+    max_score: float | None = None,
+) -> list[dict]:
+    """Highest-scoring leads -- the "work these first" preview. Ordering and
+    the row cap are pushed into SQL so only `limit` rows come back, instead of
+    the frontend pulling every lead and sorting client-side."""
+    where, params = _score_filter(source, min_score, max_score)
     return _lead_rows(where, params, limit, order="quality_score DESC")
+
+
+def ranked_leads(
+    limit: int = 10,
+    offset: int = 0,
+    source: str | None = None,
+    min_score: float | None = None,
+    max_score: float | None = None,
+) -> dict:
+    """One page of the score-ranked call list, plus the true total number of
+    matches so the UI can render page controls without downloading every row.
+    Same source / score-range filters as top_leads."""
+    where, params = _score_filter(source, min_score, max_score)
+    engine = get_engine()
+    total = 0
+    if inspect(engine).has_table("leads"):
+        try:
+            with engine.connect() as conn:
+                total = conn.execute(text(f"SELECT count(*) FROM leads WHERE {where}"), params).scalar() or 0
+        except Exception:
+            total = 0
+    rows = _lead_rows(where, params, limit, order="quality_score DESC", offset=offset)
+    return {"total": int(total), "rows": rows}
 
 
 def search_leads(q: str | None = None, source: str | None = None, limit: int = 200) -> dict:

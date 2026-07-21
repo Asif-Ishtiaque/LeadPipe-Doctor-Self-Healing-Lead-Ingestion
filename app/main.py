@@ -22,6 +22,7 @@ from app.utils.storage import (
     get_analytics,
     get_stats,
     persist_leads_atomic,
+    ranked_leads,
     read_recent,
     save_healing_events,
     save_invalid,
@@ -129,10 +130,29 @@ def list_leads(limit: int = 100) -> list[dict[str, Any]]:
 
 
 @app.get("/leads/top")
-def list_top_leads(limit: int = 8, source: str | None = None) -> list[dict[str, Any]]:
+def list_top_leads(
+    limit: int = 8,
+    source: str | None = None,
+    min_score: float | None = None,
+    max_score: float | None = None,
+) -> list[dict[str, Any]]:
     # Highest-scoring leads for the "work these first" panels. Ordering + cap
     # live in SQL, so the response is `limit` rows, not the whole table.
-    return top_leads(limit=limit, source=source)
+    # Optional source / score-range filters back the Lead Analytics controls.
+    return top_leads(limit=limit, source=source, min_score=min_score, max_score=max_score)
+
+
+@app.get("/leads/ranked")
+def list_ranked_leads(
+    limit: int = 10,
+    offset: int = 0,
+    source: str | None = None,
+    min_score: float | None = None,
+    max_score: float | None = None,
+) -> dict[str, Any]:
+    # Paginated score-ranked call list: one page of rows + the true match
+    # total, so the UI can page without downloading the whole table.
+    return ranked_leads(limit=limit, offset=offset, source=source, min_score=min_score, max_score=max_score)
 
 
 @app.get("/leads/search")

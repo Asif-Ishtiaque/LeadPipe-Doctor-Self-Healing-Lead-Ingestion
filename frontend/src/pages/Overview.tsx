@@ -16,7 +16,7 @@ export default function Overview() {
   const analyticsQ = useAnalytics();
   const [tab, setTab] = useState<string>("All");
   const src = tab === "All" ? undefined : tab;
-  const topQ = useTopLeads(6, src);
+  const topQ = useTopLeads(6, { source: src });
 
   const s = stats.data;
   const a = analyticsQ.data;
