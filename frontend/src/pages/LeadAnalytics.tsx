@@ -1,43 +1,43 @@
 import { useMemo } from "react";
-import { useLeads } from "../hooks/queries";
+import { useAnalytics, useTopLeads } from "../hooks/queries";
 import { Avatar, Panel, StatCard } from "../components/ui";
 import { AvgBySource, ScoreHistogram, SignalRadar, type RadarSeries } from "../components/charts";
-import { avgBySource, buildRadar, buildScoreHistogram } from "../lib/derive";
+import { avgBySource, buildRadar, buildScoreHistogram, funnel, metricsFor } from "../lib/derive";
 import { bandColor, COLORS, initials, leadName, num, prettySource } from "../lib/format";
 
 export default function LeadAnalytics() {
-  const { data, isError } = useLeads(100000);
-  const leads = data ?? [];
-  const scored = useMemo(() => leads.filter((l) => l.quality_score != null), [leads]);
+  const { data: a, isError } = useAnalytics();
+  const topQ = useTopLeads(8);
+  const top = topQ.data ?? [];
 
-  const hi = scored.filter((l) => (l.quality_score ?? 0) >= 70);
-  const med = scored.filter((l) => (l.quality_score ?? 0) >= 40 && (l.quality_score ?? 0) < 70);
-  const lo = scored.filter((l) => (l.quality_score ?? 0) < 40);
-  const consentPct = scored.length ? Math.round((scored.filter((l) => l.consent).length / scored.length) * 100) : 0;
-
-  const hist = useMemo(() => buildScoreHistogram(leads), [leads]);
-  const bySrc = useMemo(() => avgBySource(leads), [leads]);
-  const radar = useMemo(() => buildRadar(leads), [leads]);
-  const top = useMemo(() => [...scored].sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0)).slice(0, 8), [scored]);
+  const m = useMemo(() => (a ? metricsFor(a) : null), [a]);
+  const fun = useMemo(() => (a ? funnel(a) : { high: 0, medium: 0, low: 0 }), [a]);
+  const hist = useMemo(() => (a ? buildScoreHistogram(a) : []), [a]);
+  const bySrc = useMemo(() => (a ? avgBySource(a) : []), [a]);
+  const radar = useMemo(() => (a ? buildRadar(a) : { axes: [], series: [] }), [a]);
 
   if (isError) return <div className="text-bad">Couldn’t reach the API.</div>;
-  const pct = (n: number) => (scored.length ? Math.round((n / scored.length) * 1000) / 10 : 0);
+  if (!a || !m) return <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">{Array.from({ length: 4 }).map((_, i) => <div key={i} className="h-24 rounded-2xl bg-panel border border-line animate-pulse" />)}</div>;
+
+  const scoredCount = m.scored;
+  const consentPct = scoredCount ? Math.round((m.consent / scoredCount) * 100) : 0;
+  const pct = (n: number) => (scoredCount ? Math.round((n / scoredCount) * 1000) / 10 : 0);
 
   return (
     <div className="flex flex-col gap-[18px]">
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <StatCard label="Scored leads" value={num(scored.length)} sub="in view" accent={COLORS.brand} />
-        <StatCard label="High quality" value={num(hi.length)} sub={`${pct(hi.length)}% of scored`} accent={COLORS.good} />
-        <StatCard label="Low quality" value={num(lo.length)} sub={`${pct(lo.length)}% — deprioritize`} accent={COLORS.bad} />
+        <StatCard label="Scored leads" value={num(scoredCount)} sub="in view" accent={COLORS.brand} />
+        <StatCard label="High quality" value={num(fun.high)} sub={`${pct(fun.high)}% of scored`} accent={COLORS.good} />
+        <StatCard label="Low quality" value={num(fun.low)} sub={`${pct(fun.low)}% — deprioritize`} accent={COLORS.bad} />
         <StatCard label="Consented" value={`${consentPct}%`} sub="opted in to contact" accent={COLORS.dup} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-[18px]">
         <Panel title="Quality funnel" cap="How scored leads split across the priority bands.">
           <div className="flex flex-col items-center gap-2 pt-1">
-            <Fbar label="High" value={hi.length} pct={100} color={COLORS.good} />
-            <Fbar label="Medium" value={med.length} pct={hi.length ? Math.round((med.length / hi.length) * 100) : 100} color={COLORS.warn} />
-            <Fbar label="Low" value={lo.length} pct={hi.length ? Math.round((lo.length / hi.length) * 100) : 100} color={COLORS.bad} />
+            <Fbar label="High" value={fun.high} pct={100} color={COLORS.good} />
+            <Fbar label="Medium" value={fun.medium} pct={fun.high ? Math.round((fun.medium / fun.high) * 100) : 100} color={COLORS.warn} />
+            <Fbar label="Low" value={fun.low} pct={fun.high ? Math.round((fun.low / fun.high) * 100) : 100} color={COLORS.bad} />
           </div>
         </Panel>
         <Panel title="Score distribution" cap="Every scored lead, bucketed 0–100."><ScoreHistogram data={hist} /></Panel>

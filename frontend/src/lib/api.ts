@@ -1,4 +1,4 @@
-import type { HealingEvent, IngestSummary, Lead, Stats } from "./types";
+import type { Analytics, HealingEvent, IngestSummary, Lead, LeadSearchResult, Stats } from "./types";
 
 export const API_BASE =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ||
@@ -12,7 +12,16 @@ async function get<T>(path: string): Promise<T> {
 
 export const api = {
   stats: () => get<Stats>("/stats"),
-  leads: (limit = 5000) => get<Lead[]>(`/leads?limit=${limit}`),
+
+  // SQL-aggregated metrics for every chart/KPI — a few KB, not the whole table.
+  analytics: () => get<Analytics>("/analytics"),
+  topLeads: (limit = 8, source?: string) =>
+    get<Lead[]>(`/leads/top?limit=${limit}${source ? `&source=${encodeURIComponent(source)}` : ""}`),
+  searchLeads: (q: string, limit = 200, source?: string) =>
+    get<LeadSearchResult>(
+      `/leads/search?limit=${limit}${q ? `&q=${encodeURIComponent(q)}` : ""}${source ? `&source=${encodeURIComponent(source)}` : ""}`,
+    ),
+
   duplicates: (limit = 2000) => get<Lead[]>(`/duplicates?limit=${limit}`),
   invalid: (limit = 2000) => get<Record<string, unknown>[]>(`/invalid?limit=${limit}`),
   healingEvents: (limit = 1000) => get<HealingEvent[]>(`/healing-events?limit=${limit}`),

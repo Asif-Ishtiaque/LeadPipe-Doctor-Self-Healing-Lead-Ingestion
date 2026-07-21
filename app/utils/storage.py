@@ -314,6 +314,155 @@ def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
     return kept, duplicates
 
 
+_LEAD_VIEW_COLUMNS = (
+    "lead_id, first_name, last_name, email, phone_e164, source, campaign_id, "
+    "consent, created_at, quality_score, status, duplicate_of_lead_id, "
+    "diagnosis, suggested_action"
+)
+
+
+def _lead_rows(where: str, params: dict, limit: int, order: str) -> list[dict]:
+    """Shared reader for the two lead-list endpoints (top / search). Selects
+    only the columns the UI renders -- explicitly *not* raw_payload, which is
+    by far the largest field and is what made a naive `SELECT *` of the whole
+    table a ~32 MB response. `where`/`order` are code-controlled fragments,
+    never user text; all user input arrives through bound `params`."""
+    engine = get_engine()
+    if not inspect(engine).has_table("leads"):
+        return []
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"SELECT {_LEAD_VIEW_COLUMNS} FROM leads WHERE {where} ORDER BY {order} LIMIT :limit"),
+                {**params, "limit": limit},
+            )
+            return [dict(row._mapping) for row in result]
+    except Exception:
+        return []
+
+
+def top_leads(limit: int = 8, source: str | None = None) -> list[dict]:
+    """Highest-scoring leads -- the "work these first" list. Ordering and the
+    row cap are pushed into SQL so only `limit` rows come back, instead of the
+    frontend pulling every lead and sorting client-side."""
+    where = "quality_score IS NOT NULL"
+    params: dict = {}
+    if source:
+        where += " AND source = :source"
+        params["source"] = source
+    return _lead_rows(where, params, limit, order="quality_score DESC")
+
+
+def search_leads(q: str | None = None, source: str | None = None, limit: int = 200) -> dict:
+    """Server-side search for the Leads table. Returns at most `limit` rows
+    plus the true total number of matches, so the UI can say "showing N of M"
+    without ever downloading M rows. Matching is a case-insensitive substring
+    over name/email (bound parameter -> no injection surface)."""
+    engine = get_engine()
+    if not inspect(engine).has_table("leads"):
+        return {"total": 0, "rows": []}
+
+    where = "1=1"
+    params: dict = {}
+    if q and q.strip():
+        where += " AND (lower(first_name) LIKE :like OR lower(last_name) LIKE :like OR lower(email) LIKE :like)"
+        params["like"] = f"%{q.strip().lower()}%"
+    if source:
+        where += " AND source = :source"
+        params["source"] = source
+
+    total = 0
+    try:
+        with engine.connect() as conn:
+            total = conn.execute(text(f"SELECT count(*) FROM leads WHERE {where}"), params).scalar() or 0
+    except Exception:
+        total = 0
+
+    # Newest first. On Postgres _seq exists (see _ensure_seq_column); on the
+    # DuckDB dev fallback there's no _seq, so fall back to created_at.
+    is_postgres = settings.database_url.startswith(("postgresql", "postgres"))
+    if is_postgres:
+        _ensure_seq_column(engine, "leads")
+    order = "_seq DESC" if is_postgres else "created_at DESC"
+    return {"total": int(total), "rows": _lead_rows(where, params, limit, order=order)}
+
+
+def get_analytics() -> dict:
+    """Everything the dashboard's charts and KPIs need, computed as SQL
+    aggregates in a handful of GROUP BY queries instead of shipping all
+    ~34k leads to the browser to be reduced client-side (the old
+    /leads?limit=100000 -> 32 MB path). The payload here is a few KB
+    regardless of table size: per-source metrics + a small score-bucket
+    histogram the frontend re-slices into the butterfly, distribution and
+    funnel charts."""
+    engine = get_engine()
+
+    def rows(sql: str) -> list[tuple]:
+        try:
+            with engine.connect() as conn:
+                return list(conn.execute(text(sql)))
+        except Exception:
+            return []
+
+    # Per-source metrics: counts, score sum (for averages) and per-signal
+    # completeness (email/phone/consent/campaign/name present), all in one pass.
+    by_source: dict[str, dict] = {}
+    for r in rows(
+        """
+        SELECT source,
+               count(*)                                                         AS total,
+               sum(CASE WHEN status = 'clean'   THEN 1 ELSE 0 END)              AS clean,
+               sum(CASE WHEN status = 'flagged' THEN 1 ELSE 0 END)              AS flagged,
+               count(quality_score)                                            AS scored,
+               coalesce(sum(quality_score), 0)                                 AS sum_score,
+               sum(CASE WHEN email        IS NOT NULL AND email        <> '' THEN 1 ELSE 0 END) AS email,
+               sum(CASE WHEN phone_e164   IS NOT NULL AND phone_e164   <> '' THEN 1 ELSE 0 END) AS phone,
+               sum(CASE WHEN consent THEN 1 ELSE 0 END)                        AS consent,
+               sum(CASE WHEN campaign_id  IS NOT NULL AND campaign_id  <> '' THEN 1 ELSE 0 END) AS campaign,
+               sum(CASE WHEN first_name   IS NOT NULL AND first_name   <> '' THEN 1 ELSE 0 END) AS name
+        FROM leads GROUP BY source
+        """
+    ):
+        source, total, clean, flagged, scored, sum_score, email, phone, consent, campaign, name = r
+        by_source[source] = {
+            "total": int(total or 0),
+            "clean": int(clean or 0),
+            "flagged": int(flagged or 0),
+            "scored": int(scored or 0),
+            "sum_score": float(sum_score or 0),
+            "email": int(email or 0),
+            "phone": int(phone or 0),
+            "consent": int(consent or 0),
+            "campaign": int(campaign or 0),
+            "name": int(name or 0),
+        }
+
+    # Score histogram in 10-point buckets, split by source and status. bucket
+    # = floor(score/10), so 0..9 with a perfect 100 landing in bucket 10 -- the
+    # frontend folds bucket 10 into the top band. ~5 sources x 3 statuses x 11
+    # buckets is a tiny, fixed-size result.
+    buckets = [
+        {"source": src, "status": status, "bucket": int(bucket), "count": int(count)}
+        for src, status, bucket, count in rows(
+            """
+            SELECT source, status, floor(quality_score / 10) AS bucket, count(*) AS count
+            FROM leads WHERE quality_score IS NOT NULL
+            GROUP BY source, status, floor(quality_score / 10)
+            """
+        )
+    ]
+
+    invalid_by_source = {src: int(c) for src, c in rows("SELECT source, count(*) FROM invalid_leads GROUP BY source")}
+    duplicate_by_source = {src: int(c) for src, c in rows("SELECT source, count(*) FROM duplicate_leads GROUP BY source")}
+
+    return {
+        "by_source": by_source,
+        "buckets": buckets,
+        "invalid_by_source": invalid_by_source,
+        "duplicate_by_source": duplicate_by_source,
+    }
+
+
 def get_stats() -> dict:
     """Same numbers as before, but via SQL aggregation instead of loading
     entire tables into pandas -- the old version took 1.3s+ at ~90k rows

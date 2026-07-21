@@ -5,6 +5,13 @@ import { COLORS, num, prettySource, SOURCE_COLORS, STATUS_COLORS } from "../lib/
 
 const AXIS = { fontSize: 12, fill: COLORS.muted };
 
+// Recharts' enter animation starts marks at zero size and tweens up. With our
+// 8s live refetch (and a second data fetch resolving after mount), a re-render
+// can land mid-animation and leave bars stuck at their 0-height start frame.
+// Rendering at final size immediately is both correct and avoids the whole
+// dashboard re-animating on every poll.
+const NO_ANIM = { isAnimationActive: false } as const;
+
 export function SourceBars({ data }: { data: { source: string; count: number }[] }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
@@ -12,7 +19,7 @@ export function SourceBars({ data }: { data: { source: string; count: number }[]
         <XAxis dataKey="source" tickFormatter={prettySource} tick={AXIS} axisLine={false} tickLine={false} />
         <YAxis tick={AXIS} axisLine={false} tickLine={false} width={44} />
         <Tooltip formatter={(v: number) => num(v)} cursor={{ fill: "#00000008" }} />
-        <Bar dataKey="count" radius={[8, 8, 4, 4]} maxBarSize={64}>
+        <Bar dataKey="count" radius={[8, 8, 4, 4]} maxBarSize={64} {...NO_ANIM}>
           {data.map((d) => <Cell key={d.source} fill={SOURCE_COLORS[d.source] ?? COLORS.brand} />)}
         </Bar>
       </BarChart>
@@ -26,7 +33,7 @@ export function OutcomeDonut({ data }: { data: { name: string; value: number }[]
     <div className="flex items-center gap-6 flex-wrap">
       <ResponsiveContainer width={190} height={190}>
         <PieChart>
-          <Pie data={data} dataKey="value" nameKey="name" innerRadius={58} outerRadius={90} paddingAngle={1} stroke="none">
+          <Pie data={data} dataKey="value" nameKey="name" innerRadius={58} outerRadius={90} paddingAngle={1} stroke="none" {...NO_ANIM}>
             {data.map((d) => <Cell key={d.name} fill={STATUS_COLORS[d.name] ?? COLORS.muted} />)}
           </Pie>
           <Tooltip formatter={(v: number) => `${num(v)} (${((v / total) * 100).toFixed(1)}%)`} />
@@ -52,8 +59,8 @@ export function ScoreHistogram({ data }: { data: { bucket: string; clean: number
         <XAxis dataKey="bucket" tick={AXIS} axisLine={false} tickLine={false} />
         <YAxis tick={AXIS} axisLine={false} tickLine={false} width={44} />
         <Tooltip formatter={(v: number) => num(v)} cursor={{ fill: "#00000008" }} />
-        <Bar dataKey="clean" stackId="s" fill={COLORS.good} radius={[0, 0, 0, 0]} />
-        <Bar dataKey="flagged" stackId="s" fill={COLORS.warn} radius={[6, 6, 0, 0]} />
+        <Bar dataKey="clean" stackId="s" fill={COLORS.good} radius={[0, 0, 0, 0]} {...NO_ANIM} />
+        <Bar dataKey="flagged" stackId="s" fill={COLORS.warn} radius={[6, 6, 0, 0]} {...NO_ANIM} />
       </BarChart>
     </ResponsiveContainer>
   );
@@ -66,7 +73,7 @@ export function AvgBySource({ data }: { data: { source: string; avg: number }[] 
         <XAxis type="number" domain={[0, 100]} tick={AXIS} axisLine={false} tickLine={false} />
         <YAxis type="category" dataKey="source" tickFormatter={prettySource} tick={AXIS} axisLine={false} tickLine={false} width={92} />
         <Tooltip formatter={(v: number) => `${v} avg`} cursor={{ fill: "#00000008" }} />
-        <Bar dataKey="avg" radius={[4, 4, 4, 4]} maxBarSize={26}>
+        <Bar dataKey="avg" radius={[4, 4, 4, 4]} maxBarSize={26} {...NO_ANIM}>
           {data.map((d) => (
             <Cell key={d.source} fill={d.avg >= 70 ? COLORS.good : d.avg >= 40 ? COLORS.warn : COLORS.bad} />
           ))}

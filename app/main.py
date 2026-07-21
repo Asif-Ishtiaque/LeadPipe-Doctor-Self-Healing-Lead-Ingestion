@@ -18,7 +18,17 @@ from fastapi.responses import JSONResponse
 from app.agent import human_review
 from app.agent.graph import run_self_healing
 from app.schema.canonical import LeadSource
-from app.utils.storage import get_stats, persist_leads_atomic, read_recent, save_healing_events, save_invalid, save_leads
+from app.utils.storage import (
+    get_analytics,
+    get_stats,
+    persist_leads_atomic,
+    read_recent,
+    save_healing_events,
+    save_invalid,
+    save_leads,
+    search_leads,
+    top_leads,
+)
 
 app = FastAPI(title="LeadPipe Doctor", description="Self-healing lead ingestion agent")
 
@@ -116,6 +126,29 @@ async def ingest_csv(file: UploadFile) -> JSONResponse:
 @app.get("/leads")
 def list_leads(limit: int = 100) -> list[dict[str, Any]]:
     return read_recent("leads", limit).to_dict(orient="records")
+
+
+@app.get("/leads/top")
+def list_top_leads(limit: int = 8, source: str | None = None) -> list[dict[str, Any]]:
+    # Highest-scoring leads for the "work these first" panels. Ordering + cap
+    # live in SQL, so the response is `limit` rows, not the whole table.
+    return top_leads(limit=limit, source=source)
+
+
+@app.get("/leads/search")
+def search_leads_endpoint(q: str | None = None, source: str | None = None, limit: int = 200) -> dict[str, Any]:
+    # Server-side search for the Leads table: returns the matching page of
+    # rows plus the true match total ("showing N of M"), without the browser
+    # ever downloading M rows.
+    return search_leads(q=q, source=source, limit=limit)
+
+
+@app.get("/analytics")
+def analytics() -> dict[str, Any]:
+    # SQL-aggregated per-source metrics + score-bucket histogram that drive
+    # every chart/KPI on the dashboard. Replaces the old client-side reduction
+    # over a 32 MB /leads?limit=100000 download (see storage.get_analytics).
+    return get_analytics()
 
 
 @app.get("/duplicates")

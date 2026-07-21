@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
-import { useLeads, useStats } from "../hooks/queries";
+import { useAnalytics, useStats, useTopLeads } from "../hooks/queries";
 import { Avatar, KpiCard, Panel } from "../components/ui";
 import { Butterfly, SignalRadar, type RadarSeries } from "../components/charts";
 import { bandColor, num, prettySource, SOURCE_COLORS } from "../lib/format";
-import { buildButterfly, buildRadar } from "../lib/derive";
+import { buildButterfly, buildRadar, kpis, sources as sourcesOf } from "../lib/derive";
 import type { Lead } from "../lib/types";
 
 const IconUsers = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 6"/></svg>);
@@ -13,28 +13,24 @@ const IconGauge = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" st
 
 export default function Overview() {
   const stats = useStats();
-  const leadsQ = useLeads(100000);
+  const analyticsQ = useAnalytics();
   const [tab, setTab] = useState<string>("All");
+  const src = tab === "All" ? undefined : tab;
+  const topQ = useTopLeads(6, src);
 
-  const leads = leadsQ.data ?? [];
   const s = stats.data;
-  const sources = useMemo(() => Object.keys(s?.leads_by_source ?? {}).sort(), [s]);
-  const tabbed = tab === "All" ? leads : leads.filter((l) => l.source === tab);
+  const a = analyticsQ.data;
+  const topLeads = topQ.data ?? [];
 
-  const clean = tabbed.filter((l) => l.status === "clean");
-  const flagged = tabbed.filter((l) => l.status === "flagged");
-  const scored = tabbed.filter((l) => l.quality_score != null);
-  const avg = scored.length ? Math.round(scored.reduce((a, l) => a + (l.quality_score ?? 0), 0) / scored.length) : null;
+  const sources = useMemo(() => (a ? sourcesOf(a) : []), [a]);
+  const k = useMemo(() => (a ? kpis(a, src) : null), [a, src]);
+  const butterfly = useMemo(() => (a ? buildButterfly(a, src) : []), [a, src]);
+  const radar = useMemo(() => (a ? buildRadar(a) : { axes: [], series: [] }), [a]);
   const processed = s ? s.total_clean + s.total_flagged + s.total_invalid + s.total_duplicates : 0;
-  const highPct = scored.length ? Math.round((scored.filter((l) => (l.quality_score ?? 0) >= 70).length / scored.length) * 1000) / 10 : 0;
 
-  const topLeads = [...scored].sort((a, b) => (b.quality_score ?? 0) - (a.quality_score ?? 0)).slice(0, 6);
-  const butterfly = useMemo(() => buildButterfly(leads), [leads]);
-  const radar = useMemo(() => buildRadar(leads), [leads]);
-
-  if (leadsQ.isError || stats.isError)
+  if (analyticsQ.isError || stats.isError)
     return <div className="text-bad bg-white rounded-xl2 border border-line p-6">Couldn’t reach the API at <code>{import.meta.env.VITE_API_BASE_URL ?? "http://localhost:8000"}</code>. Is the FastAPI service running (and CORS enabled)?</div>;
-  if (!s) return <Skeleton />;
+  if (!s || !a || !k) return <Skeleton />;
 
   return (
     <div className="flex flex-col gap-[18px]">
@@ -51,10 +47,10 @@ export default function Overview() {
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.35fr] gap-[18px]">
         <div className="grid grid-cols-2 gap-4">
-          <KpiCard icon={<IconUsers />} label="Total leads" value={num(tabbed.length)} />
-          <KpiCard icon={<IconCheck />} label="Clean leads" value={num(clean.length)} />
-          <KpiCard icon={<IconFlag />} label="Flagged" value={num(flagged.length)} />
-          <KpiCard icon={<IconGauge />} label="Avg lead score" value={avg != null ? String(avg) : "—"} />
+          <KpiCard icon={<IconUsers />} label="Total leads" value={num(k.total)} />
+          <KpiCard icon={<IconCheck />} label="Clean leads" value={num(k.clean)} />
+          <KpiCard icon={<IconFlag />} label="Flagged" value={num(k.flagged)} />
+          <KpiCard icon={<IconGauge />} label="Avg lead score" value={k.avg != null ? String(k.avg) : "—"} />
         </div>
 
         <div className="bg-panel rounded-xl2 px-6 py-[22px] border border-line shadow-card flex flex-col">
@@ -63,7 +59,7 @@ export default function Overview() {
             <div className="flex flex-col gap-4">
               <Reach k="Records processed" v={num(processed)} />
               <Reach k="Connected sources" v={String(sources.length)} />
-              <Reach k="High-quality rate" v={`${highPct}%`} />
+              <Reach k="High-quality rate" v={`${k.highPct}%`} />
               <Reach k="Human review" v={num(s.human_review_pending)} />
             </div>
             <div className="flex flex-col gap-3 justify-center">

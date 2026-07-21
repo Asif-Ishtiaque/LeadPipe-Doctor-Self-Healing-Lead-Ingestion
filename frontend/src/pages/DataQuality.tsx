@@ -1,23 +1,25 @@
 import { useMemo } from "react";
-import { useDuplicates, useInvalid, useLeads } from "../hooks/queries";
+import { useAnalytics, useInvalid } from "../hooks/queries";
 import { Panel, StatCard } from "../components/ui";
 import { SourceBars } from "../components/charts";
+import { metricsFor, toBars } from "../lib/derive";
 import { COLORS, num } from "../lib/format";
 
 export default function DataQuality() {
   const inv = useInvalid();
-  const dup = useDuplicates();
-  const leadsQ = useLeads(100000);
+  const { data: a } = useAnalytics();
   const invalid = inv.data ?? [];
-  const duplicates = dup.data ?? [];
-  const leads = leadsQ.data ?? [];
 
-  const invBySource = useMemo(() => countBy(invalid.map((r) => String(r["source"] ?? "unknown"))), [invalid]);
-  const dupBySource = useMemo(() => countBy(duplicates.map((r) => String((r as { source?: string }).source ?? "unknown"))), [duplicates]);
+  // True per-source counts come from SQL aggregates, not a sampled page of
+  // rows (the old approach only ever showed whichever source happened to be
+  // most recent).
+  const invBySource = useMemo(() => (a ? toBars(a.invalid_by_source) : []), [a]);
+  const dupBySource = useMemo(() => (a ? toBars(a.duplicate_by_source) : []), [a]);
   const failures = useMemo(() => topFailures(invalid), [invalid]);
 
-  const noConsent = leads.filter((l) => l.consent === false).length;
-  const noCampaign = leads.filter((l) => !l.campaign_id).length;
+  const m = a ? metricsFor(a) : null;
+  const noConsent = m ? m.total - m.consent : 0;
+  const noCampaign = m ? m.total - m.campaign : 0;
 
   return (
     <div className="flex flex-col gap-[18px]">
@@ -56,12 +58,6 @@ export default function DataQuality() {
       </div>
     </div>
   );
-}
-
-function countBy(items: string[]): { source: string; count: number }[] {
-  const m = new Map<string, number>();
-  for (const s of items) m.set(s, (m.get(s) ?? 0) + 1);
-  return [...m.entries()].map(([source, count]) => ({ source, count })).sort((a, b) => b.count - a.count);
 }
 
 function topFailures(invalid: Record<string, unknown>[]): { reason: string; count: number }[] {

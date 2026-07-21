@@ -32,6 +32,42 @@ export interface Stats {
   human_review_pending: number;
 }
 
+// Per-source aggregate metrics from /analytics (all computed in SQL).
+export interface SourceMetrics {
+  total: number;
+  clean: number;
+  flagged: number;
+  scored: number;
+  sum_score: number;
+  email: number;
+  phone: number;
+  consent: number;
+  campaign: number;
+  name: number;
+}
+
+// One (source, status, 10-point score bucket) count. bucket = floor(score/10),
+// so 0..10 (a perfect 100 lands in bucket 10).
+export interface ScoreBucket {
+  source: string;
+  status: string;
+  bucket: number;
+  count: number;
+}
+
+export interface Analytics {
+  by_source: Record<string, SourceMetrics>;
+  buckets: ScoreBucket[];
+  invalid_by_source: Record<string, number>;
+  duplicate_by_source: Record<string, number>;
+}
+
+// /leads/search envelope: a page of rows plus the true total match count.
+export interface LeadSearchResult {
+  total: number;
+  rows: Lead[];
+}
+
 export interface HealingEvent {
   attempt?: number;
   exception_type?: string;
