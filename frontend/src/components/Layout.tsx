@@ -1,5 +1,7 @@
 import { NavLink, Outlet, useLocation } from "react-router-dom";
-import type { ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState, type ReactNode } from "react";
+import { formatUpdatedAt } from "../lib/format";
 
 const IconHome = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>);
 const IconLeads = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 6M17.5 20a5.5 5.5 0 0 0-3-4.9"/></svg>);
@@ -7,6 +9,7 @@ const IconChart = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" st
 const IconSearch = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-3.5-3.5"/></svg>);
 const IconHeal = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 6.5a3.5 3.5 0 0 0-5 0l-3.5 3.5a3.5 3.5 0 0 0 5 5"/><path d="M10 17.5a3.5 3.5 0 0 0 5 0l3.5-3.5a3.5 3.5 0 0 0-5-5"/></svg>);
 const IconUpload = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 15V4M8.5 7.5 12 4l3.5 3.5"/><path d="M5 15v3.5h14V15"/></svg>);
+const IconRefresh = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 4v4h-4"/></svg>);
 
 const NAV = [
   { to: "/", label: "Overview", icon: <IconHome />, end: true },
@@ -46,22 +49,36 @@ function NavItem({ to, label, icon, end }: { to: string; label: string; icon: Re
 export default function Layout() {
   const { pathname } = useLocation();
   const [title, sub] = SUBTITLES[pathname] ?? ["QuaLead AI", ""];
-  const time = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const qc = useQueryClient();
+  const [updatedAt, setUpdatedAt] = useState<Date>(() => new Date());
+  const [spinning, setSpinning] = useState(false);
+
+  // Keep the "Last Updated" stamp roughly in step with the live 8s poll.
+  useEffect(() => {
+    const id = setInterval(() => setUpdatedAt(new Date()), 8000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Refetch everything on demand. The data refetches in the background either
+  // way, so the click needs its own visible feedback -- spin the icon for a
+  // beat so the press clearly registers even when the numbers don't change.
+  const refresh = () => {
+    qc.invalidateQueries();
+    setUpdatedAt(new Date());
+    setSpinning(true);
+    setTimeout(() => setSpinning(false), 700);
+  };
 
   return (
     <div className="p-[22px]">
       <div className="max-w-[1420px] mx-auto grid grid-cols-1 lg:grid-cols-[262px_1fr] bg-panel rounded-xl3 shadow-lift overflow-hidden min-h-[88vh]">
         {/* ---- left drawer ---- */}
         <aside className="hidden lg:flex flex-col gap-1.5 border-r border-line p-4">
-          <div className="flex items-center gap-3 border border-line2 rounded-2xl px-3 py-2.5 shadow-card">
-            <div className="w-[38px] h-[38px] rounded-full grid place-items-center text-white font-bold text-[0.9rem]" style={{ background: "linear-gradient(135deg,#2563EB,#7C5CFC)" }}>JL</div>
-            <div className="leading-tight">
-              <div className="font-bold text-[0.9rem]">Jordan Lee</div>
-              <div className="text-[0.74rem] text-muted">jordan@acme.co</div>
-            </div>
+          <div className="flex items-center gap-2.5 px-2 py-1.5 mb-1">
+            <span className="text-[1.1rem] font-extrabold tracking-tight">QuaLead AI</span>
           </div>
 
-          <div className="text-[0.66rem] font-bold text-faint uppercase tracking-wider mt-3.5 mb-1 px-2">Menu</div>
+          <div className="text-[0.66rem] font-bold text-faint uppercase tracking-wider mt-1.5 mb-1 px-2">Menu</div>
           <nav className="flex flex-col gap-0.5">
             {NAV.map((n) => <NavItem key={n.to} {...n} />)}
           </nav>
@@ -79,10 +96,6 @@ export default function Layout() {
               <span className="w-[19px] h-[19px]"><IconSearch /></span>
               <input className="w-full border-none bg-transparent outline-none text-[0.95rem] text-ink placeholder:text-faint" placeholder="Search leads, emails, campaigns..." />
             </div>
-            <div className="flex items-center gap-2.5 pl-1.5">
-              <div className="w-[34px] h-[34px] rounded-full grid place-items-center text-white font-extrabold text-[0.9rem]" style={{ background: "linear-gradient(135deg,#22C55E,#16A34A)" }}>A</div>
-              <div className="leading-tight"><div className="font-bold text-[0.86rem]">Acme Co</div><div className="text-[0.72rem] text-muted">Workspace</div></div>
-            </div>
           </div>
 
           <div className="bg-content px-[26px] pt-[22px] pb-9 flex-1 overflow-x-hidden">
@@ -91,11 +104,19 @@ export default function Layout() {
                 <h1 className="text-[1.7rem] font-extrabold tracking-tight m-0">{title}</h1>
                 <div className="text-[0.9rem] text-muted mt-1">{sub}</div>
               </div>
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2.5 shrink-0">
                 <span className="text-[0.72rem] font-bold text-good bg-goodbg px-3 py-1.5 rounded-full inline-flex items-center gap-2">
                   <span className="w-[7px] h-[7px] rounded-full bg-good" />LIVE
                 </span>
-                <span className="text-[0.72rem] text-faint tnum">Updated {time}</span>
+                <span className="text-[0.72rem] text-faint">{formatUpdatedAt(updatedAt)}</span>
+                <button
+                  onClick={refresh}
+                  title="Refresh now"
+                  aria-label="Refresh"
+                  className={`w-8 h-8 rounded-full grid place-items-center text-muted border border-line2 hover:text-brand hover:border-brand active:scale-95 transition-colors [&>svg]:w-[15px] [&>svg]:h-[15px] [&>svg]:stroke-current ${spinning ? "[&>svg]:animate-spin text-brand border-brand" : ""}`}
+                >
+                  <IconRefresh />
+                </button>
               </div>
             </div>
             <Outlet />

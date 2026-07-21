@@ -54,6 +54,21 @@ export function initials(l: Lead): string {
   return name.split(" ").map((w) => w[0]).slice(0, 2).join("").toUpperCase();
 }
 
+// Words that should stay all-caps rather than title-cased (e.g. "csv" -> "CSV").
+const ACRONYMS: Record<string, string> = { csv: "CSV" };
+
 export function prettySource(s: string): string {
-  return s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  return s
+    .split(/[_\s]+/)
+    .filter(Boolean)
+    .map((w) => ACRONYMS[w.toLowerCase()] ?? w.charAt(0).toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
+// e.g. "Last Updated At 9:18 PM, Tue 21 July, 2026"
+export function formatUpdatedAt(d: Date): string {
+  const time = d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  const weekday = d.toLocaleDateString("en-US", { weekday: "short" });
+  const month = d.toLocaleDateString("en-US", { month: "long" });
+  return `Last Updated At ${time}, ${weekday} ${d.getDate()} ${month}, ${d.getFullYear()}`;
 }
