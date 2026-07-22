@@ -158,13 +158,19 @@ def map_source_fields(source: str, records: list[dict]) -> dict[str, str | None]
         except _RAG_UNAVAILABLE:
             known = None
         if known is not None:
-            mapping[field_name] = known
+            # A prior resolution for this (source, field) -- including a
+            # cached "no canonical target", which is what lets a repeat
+            # upload skip the (slow) LLM for columns like "Company" that
+            # will never map. This is the main repeat-upload speedup.
+            mapping[field_name] = None if known == rag_store.UNKNOWN_MAPPING else known
             continue
 
+        llm_errored = False
         try:
             resolved = _llm_match(field_name, samples)
         except _RAG_UNAVAILABLE:
             resolved = None
+            llm_errored = True
 
         if resolved is None:
             # Either Ollama/Chroma is down, or it's up but answered
@@ -177,9 +183,16 @@ def map_source_fields(source: str, records: list[dict]) -> dict[str, str | None]
             resolved = _heuristic_match(field_name)
 
         mapping[field_name] = resolved
-        if resolved:
+        # Cache the outcome so the next upload of the same header is instant.
+        # A confirmed "unknown" is cached too -- but ONLY when the LLM
+        # actually answered (not when it was unreachable), so a transient
+        # Ollama outage can't poison a field as permanently unmapped.
+        should_cache = resolved is not None or not llm_errored
+        if should_cache:
             try:
-                rag_store.remember_mapping(source, field_name, resolved, samples[0] if samples else "")
+                rag_store.remember_mapping(
+                    source, field_name, resolved or rag_store.UNKNOWN_MAPPING, samples[0] if samples else ""
+                )
             except _RAG_UNAVAILABLE:
                 pass
 

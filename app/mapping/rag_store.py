@@ -31,6 +31,13 @@ from app.utils.config import settings
 
 T = TypeVar("T")
 
+# Sentinel stored in the mapping cache for a field the mapper resolved to "no
+# canonical target" (e.g. a "Company" column the schema has no home for). We
+# cache this exactly like a real hit so a column with no mapping isn't sent to
+# the LLM on every future upload -- the single biggest repeat-upload latency
+# win. lookup returns it verbatim; the mapper translates it back to None.
+UNKNOWN_MAPPING = "__unknown__"
+
 
 class OllamaEmbeddingFunction(embedding_functions.EmbeddingFunction):
     """Chroma embedding function backed by Ollama, falling back to Chroma's
