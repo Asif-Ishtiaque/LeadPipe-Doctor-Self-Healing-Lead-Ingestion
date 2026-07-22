@@ -80,7 +80,7 @@ export default function Overview() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-[18px]">
-        <Panel title="Top leads" cap="Highest-scoring leads to work first." action={<span className="text-[0.82rem] text-brand font-semibold">+ Add lead</span>}>
+        <Panel title="Top leads" cap="Highest-scoring leads to work first.">
           <table className="w-full text-[0.85rem]">
             <thead><tr className="text-[0.68rem] uppercase tracking-wide text-faint"><th className="text-left pb-2.5 font-bold">Name</th><th className="text-right pb-2.5 font-bold">Source</th><th className="text-right pb-2.5 font-bold">Score</th></tr></thead>
             <tbody>

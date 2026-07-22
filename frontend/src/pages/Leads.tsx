@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useSearchLeads } from "../hooks/queries";
 import { Avatar, Badge, Panel } from "../components/ui";
 import { bandColor, band, leadName, initials, prettySource, STATUS_COLORS, COLORS } from "../lib/format";
@@ -8,9 +9,16 @@ const AV = ["#2563EB", "#7C5CFC", "#0EA5E9", "#F59E0B", "#16A34A"];
 const PAGE_SIZE = 200;
 
 export default function Leads() {
-  const [q, setQ] = useState("");
-  const [debouncedQ, setDebouncedQ] = useState("");
+  // Seed from the ?q= param so the global top-bar search lands here with the
+  // term already applied.
+  const [params] = useSearchParams();
+  const [q, setQ] = useState(() => params.get("q") ?? "");
+  const [debouncedQ, setDebouncedQ] = useState(() => (params.get("q") ?? "").trim());
   const [selected, setSelected] = useState<string | null>(null);
+
+  // If the top-bar search navigates here again with a new ?q=, adopt it.
+  const urlQ = params.get("q") ?? "";
+  useEffect(() => { setQ(urlQ); }, [urlQ]);
 
   // Debounce keystrokes so we hit the search endpoint once the user pauses,
   // not on every character.

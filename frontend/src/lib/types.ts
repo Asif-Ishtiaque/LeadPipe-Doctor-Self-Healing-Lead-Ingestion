@@ -82,3 +82,11 @@ export interface IngestSummary {
   invalid: number;
   field_mapping: Record<string, string | null>;
 }
+
+// Full /ingest/csv response. status is "success" | "human_review" | "error";
+// summary is null when a batch was routed to human review or failed to save.
+export interface IngestResponse {
+  status: string;
+  summary: IngestSummary | null;
+  message?: string;
+}

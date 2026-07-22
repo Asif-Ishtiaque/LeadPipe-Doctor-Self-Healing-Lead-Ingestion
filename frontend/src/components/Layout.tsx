@@ -1,7 +1,8 @@
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState, type ReactNode } from "react";
 import { formatUpdatedAt } from "../lib/format";
+import { ErrorBoundary } from "./ErrorBoundary";
 
 const IconHome = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>);
 const IconLeads = () => (<svg viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 20a5.5 5.5 0 0 1 11 0"/><path d="M16 5.2a3.2 3.2 0 0 1 0 6M17.5 20a5.5 5.5 0 0 0-3-4.9"/></svg>);
@@ -50,8 +51,10 @@ export default function Layout() {
   const { pathname } = useLocation();
   const [title, sub] = SUBTITLES[pathname] ?? ["QuaLead AI", ""];
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [updatedAt, setUpdatedAt] = useState<Date>(() => new Date());
   const [spinning, setSpinning] = useState(false);
+  const [query, setQuery] = useState("");
 
   // Keep the "Last Updated" stamp roughly in step with the live 8s poll.
   useEffect(() => {
@@ -94,7 +97,15 @@ export default function Layout() {
           <div className="flex items-center gap-4 px-[26px] py-3.5 border-b border-line">
             <div className="flex-1 flex items-center gap-2.5 text-faint">
               <span className="w-[19px] h-[19px]"><IconSearch /></span>
-              <input className="w-full border-none bg-transparent outline-none text-[0.95rem] text-ink placeholder:text-faint" placeholder="Search leads, emails, campaigns..." />
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && query.trim()) navigate(`/leads?q=${encodeURIComponent(query.trim())}`);
+                }}
+                className="w-full border-none bg-transparent outline-none text-[0.95rem] text-ink placeholder:text-faint"
+                placeholder="Search leads by name or email — press Enter"
+              />
             </div>
           </div>
 
@@ -119,7 +130,9 @@ export default function Layout() {
                 </button>
               </div>
             </div>
-            <Outlet />
+            <ErrorBoundary label={title}>
+              <Outlet />
+            </ErrorBoundary>
           </div>
         </div>
       </div>

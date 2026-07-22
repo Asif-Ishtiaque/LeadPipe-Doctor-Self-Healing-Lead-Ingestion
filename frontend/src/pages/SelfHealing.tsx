@@ -8,6 +8,11 @@ export default function SelfHealing() {
   const events = healing.data ?? [];
   const queue = review.data ?? [];
 
+  // A green "queue empty / no events" state is only reassuring if it's real.
+  // If the API is down, say so instead of implying a healthy pipeline.
+  if (healing.isError || review.isError)
+    return <div className="text-bad bg-white rounded-xl2 border border-line p-6">Couldn’t reach the API. Self-healing status is unavailable right now.</div>;
+
   return (
     <div className="flex flex-col gap-[18px]">
       <Panel title="Self-healing events" cap="When the cleaning code hits an input shape it has never seen, a local LLM rewrites the failing function and the batch retries — automatically.">

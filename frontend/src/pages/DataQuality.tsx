@@ -7,7 +7,7 @@ import { COLORS, num } from "../lib/format";
 
 export default function DataQuality() {
   const inv = useInvalid();
-  const { data: a } = useAnalytics();
+  const { data: a, isError, isLoading } = useAnalytics();
   const invalid = inv.data ?? [];
 
   // True per-source counts come from SQL aggregates, not a sampled page of
@@ -20,6 +20,13 @@ export default function DataQuality() {
   const m = a ? metricsFor(a) : null;
   const noConsent = m ? m.total - m.consent : 0;
   const noCampaign = m ? m.total - m.campaign : 0;
+
+  // Don't paint a false "all clear" when the API is unreachable or still
+  // loading -- the zeros would read as real data.
+  if (isError)
+    return <div className="text-bad bg-white rounded-xl2 border border-line p-6">Couldn’t reach the API. Data-quality numbers are unavailable right now.</div>;
+  if (isLoading || !a)
+    return <div className="grid grid-cols-1 lg:grid-cols-2 gap-[18px]">{Array.from({ length: 2 }).map((_, i) => <div key={i} className="h-64 rounded-xl2 bg-panel border border-line animate-pulse" />)}</div>;
 
   return (
     <div className="flex flex-col gap-[18px]">

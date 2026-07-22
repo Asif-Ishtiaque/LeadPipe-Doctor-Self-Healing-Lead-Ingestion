@@ -1,4 +1,4 @@
-import type { Analytics, HealingEvent, IngestSummary, Lead, LeadSearchResult, Stats } from "./types";
+import type { Analytics, HealingEvent, IngestResponse, Lead, LeadSearchResult, Stats } from "./types";
 
 export const API_BASE =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ||
@@ -40,12 +40,13 @@ export const api = {
   humanReview: () => get<Record<string, unknown>[]>("/human-review"),
 
   // Generic "upload any CSV" — routes straight to the RAG field mapper.
-  uploadCsv: async (file: File): Promise<IngestSummary | null> => {
+  // Returns the full response so the caller can distinguish success from a
+  // "sent to human review" (summary null) or a backend save error.
+  uploadCsv: async (file: File, signal?: AbortSignal): Promise<IngestResponse> => {
     const form = new FormData();
     form.append("file", file);
-    const res = await fetch(`${API_BASE}/ingest/csv`, { method: "POST", body: form });
+    const res = await fetch(`${API_BASE}/ingest/csv`, { method: "POST", body: form, signal });
     if (!res.ok) throw new Error(`Upload failed: ${res.status} ${res.statusText}`);
-    const body = (await res.json()) as { summary: IngestSummary | null };
-    return body.summary;
+    return (await res.json()) as IngestResponse;
   },
 };
