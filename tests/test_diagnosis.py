@@ -31,9 +31,9 @@ def test_strong_lead_diagnosis_names_its_strengths():
     d = diagnose(_lead())
     assert "High-quality" in d
     assert "score 85" in d
-    assert "business email domain" in d
+    assert "non-personal email domain" in d
     assert "opted in to contact" in d
-    assert "reachable by both email and phone" in d
+    assert "both email and phone captured" in d
     assert "demo_request" in d  # the actual campaign id, not a generic phrase
 
 

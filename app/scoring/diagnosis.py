@@ -9,8 +9,8 @@ maps to a concrete, inspectable signal, so the explanation can never drift
 from the number it's explaining.
 
 diagnose(lead) -> "why this score", e.g.
-  "Medium-quality lead (score 55). Strengths: business email domain,
-   reachable by both email and phone. Concerns: no marketing consent
+  "Medium-quality lead (score 55). Strengths: non-personal email domain,
+   both email and phone captured. Concerns: no marketing consent
    captured."
 
 suggest_action(lead) -> what a rep should do next, e.g.
@@ -35,9 +35,13 @@ def _positive_signals(lead: Lead, f: dict[str, float]) -> list[str]:
         and not f["email_is_disposable"]
         and not f["email_is_placeholder_like"]
     ):
-        signals.append("business email domain")
+        # We only check the domain isn't a known free/disposable/placeholder
+        # provider -- we don't verify a real company, so claim exactly that.
+        signals.append("non-personal email domain")
     if f["has_email"] and f["has_phone"]:
-        signals.append("reachable by both email and phone")
+        # Both fields are present; we haven't pinged the inbox or dialled the
+        # number, so "captured" is the honest word, not "reachable".
+        signals.append("both email and phone captured")
     if f["has_campaign_id"] and lead.campaign_id:
         signals.append(f"attributed to campaign '{lead.campaign_id}'")
     return signals
