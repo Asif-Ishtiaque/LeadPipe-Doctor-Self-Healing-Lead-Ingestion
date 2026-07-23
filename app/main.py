@@ -9,12 +9,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import csv
+import io
 import os
 
-from fastapi import FastAPI, Request, UploadFile
+from fastapi import FastAPI, Form, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel
 
 from app.agent import human_review
@@ -23,13 +25,17 @@ from app.mapping import rag_store
 from app.schema.canonical import LeadSource
 from app.utils.storage import (
     CALL_STATUSES,
+    backfill_datasets_by_source,
     call_list,
     clear_lead_tables,
-    create_pipeline_run,
-    finish_pipeline_run,
+    create_dataset,
+    delete_dataset,
+    finish_dataset,
     get_analytics,
+    get_dataset,
     get_pipeline_run,
     get_stats,
+    list_datasets,
     persist_leads_atomic,
     ranked_leads,
     read_recent,
@@ -41,6 +47,7 @@ from app.utils.storage import (
     set_disposition,
     source_performance,
     top_leads,
+    update_dataset,
 )
 
 
@@ -52,6 +59,12 @@ class ResetOptions(BaseModel):
     leads: bool = True
     review_queue: bool = True
     chroma: bool = False
+
+
+class DatasetUpdate(BaseModel):
+    name: str | None = None
+    notes: str | None = None
+    tags: str | None = None
 
 app = FastAPI(title="LeadPipe Doctor", description="Self-healing lead ingestion agent")
 
@@ -71,23 +84,21 @@ app.add_middleware(
 )
 
 
-def _persist_and_summarize(source: LeadSource, final_state: dict) -> dict[str, Any]:
+def _persist_and_summarize(source: LeadSource, final_state: dict, dataset_id: str | None = None) -> dict[str, Any]:
     result = final_state.get("result")
     summary = None
     if result is not None:
         # persist_leads_atomic is the actual source of truth for what got
-        # kept vs. deduped -- it can reclassify a lead that in-batch dedup
-        # upstream thought was "kept" into a duplicate, if a concurrent
-        # request already claimed that email/phone first. The summary
-        # reflects that real outcome, not the pre-persistence guess.
-        actually_kept, redirected = persist_leads_atomic(result.scored_leads)
+        # kept vs. deduped. Everything it writes is tagged with dataset_id so
+        # this batch stays isolated in its own dataset (dedup is per-dataset).
+        actually_kept, redirected = persist_leads_atomic(result.scored_leads, dataset_id)
         all_duplicates = result.duplicates + redirected
-        save_leads(all_duplicates, table="duplicate_leads")
-        save_invalid(result.invalid, source=source.value)
+        save_leads(all_duplicates, table="duplicate_leads", dataset_id=dataset_id)
+        save_invalid(result.invalid, source=source.value, dataset_id=dataset_id)
 
         summary = {**result.summary, "scored": len(actually_kept), "duplicates": len(all_duplicates)}
 
-    save_healing_events(source.value, final_state["healing_events"])
+    save_healing_events(source.value, final_state["healing_events"], dataset_id=dataset_id)
 
     return {
         "status": final_state["status"],
@@ -106,43 +117,55 @@ def _decode(raw: bytes | str) -> str:
     return raw.decode("utf-8-sig", errors="replace") if isinstance(raw, (bytes, bytearray)) else raw
 
 
-def _run_and_persist(source: LeadSource, raw_text: str) -> dict[str, Any]:
-    return _persist_and_summarize(source, run_self_healing(source, raw_text))
+def _run_and_persist(source: LeadSource, raw_text: str, dataset_id: str) -> dict[str, Any]:
+    return _persist_and_summarize(source, run_self_healing(source, raw_text), dataset_id)
 
 
-async def _ingest(source: LeadSource, raw_text: str) -> JSONResponse:
-    # The pipeline + persistence do blocking I/O (LLM field-mapping, embedding
-    # lookups, Postgres writes) that can run for tens of seconds. Offloading to
-    # a threadpool keeps the event loop free, so the dashboard's 8s live polls
-    # don't freeze while an upload processes. Any unexpected failure returns a
-    # friendly payload (HTTP 200, status="error") -- never a raw 500 on screen.
-    # Each ingest also opens a pipeline-run record so the batch is observable
-    # while in flight and kept as history afterward.
-    run_id = await run_in_threadpool(create_pipeline_run, source.value)
+async def _ingest(
+    source: LeadSource,
+    raw_text: str,
+    *,
+    dataset_name: str | None = None,
+    file_name: str | None = None,
+    dataset_id: str | None = None,
+) -> JSONResponse:
+    # Blocking I/O (LLM mapping, embeddings, DB writes) runs in a threadpool so
+    # the event loop stays free for the dashboard's live polls. Each ingest is
+    # one dataset: either a brand-new one (default) or an existing one to add
+    # to. An empty upload that creates nothing is rolled back so we don't leave
+    # a phantom 0-lead dataset. Failures return a friendly payload, never a 500.
+    is_new = dataset_id is None
+    if is_new:
+        name = (dataset_name or file_name or f"{source.value.replace('_', ' ').title()} import").strip()
+        ds_id = await run_in_threadpool(create_dataset, name, file_name, source.value)
+    else:
+        ds_id = dataset_id
     try:
-        result = await run_in_threadpool(_run_and_persist, source, raw_text)
+        result = await run_in_threadpool(_run_and_persist, source, raw_text, ds_id)
         summary = result.get("summary") or {}
-        processed = int(summary.get("scored", 0) or 0)
-        duplicates = int(summary.get("duplicates", 0) or 0)
-        failed = int(summary.get("invalid", 0) or 0)
-        status = "completed" if result.get("status") != "error" else "failed"
-        await run_in_threadpool(
-            lambda: finish_pipeline_run(
-                run_id, status=status, total=processed + duplicates + failed,
-                processed=processed, failed=failed, duplicates=duplicates,
+        total = int(summary.get("scored", 0) or 0) + int(summary.get("duplicates", 0) or 0) + int(summary.get("invalid", 0) or 0)
+        errored = result.get("status") == "error"
+
+        if is_new and total == 0 and not errored:
+            # Nothing landed (empty/parseless file) -> don't leave a dataset.
+            await run_in_threadpool(delete_dataset, ds_id)
+            result["dataset_id"] = None
+        else:
+            await run_in_threadpool(
+                lambda: finish_dataset(ds_id, status="failed" if errored or result.get("status") == "human_review" else "completed")
             )
-        )
-        result["run_id"] = run_id
+            result["dataset_id"] = ds_id
         return JSONResponse(result)
     except Exception:
-        await run_in_threadpool(lambda: finish_pipeline_run(run_id, status="failed"))
+        if is_new:
+            await run_in_threadpool(lambda: finish_dataset(ds_id, status="failed"))
         return JSONResponse(
             {
                 "status": "error",
                 "retries": 0,
                 "healing_events": [],
                 "summary": None,
-                "run_id": run_id,
+                "dataset_id": ds_id,
                 "message": "We processed your file but hit a problem saving the results. Please try again.",
             }
         )
@@ -184,7 +207,24 @@ async def ingest_google_form(file: UploadFile) -> JSONResponse:
 async def ingest_csv(file: UploadFile) -> JSONResponse:
     # Generic "upload any CSV" path: no assumption about column names or which
     # tool produced the file -- the RAG/LLM field mapper resolves the columns.
-    return await _ingest(LeadSource.CSV_UPLOAD, _decode(await file.read()))
+    # Creates a new dataset named after the file.
+    return await _ingest(LeadSource.CSV_UPLOAD, _decode(await file.read()), file_name=file.filename)
+
+
+@app.post("/datasets/upload")
+async def datasets_upload(
+    file: UploadFile,
+    name: str | None = Form(None),
+    dataset_id: str | None = Form(None),
+) -> JSONResponse:
+    # Dataset-aware upload. Default creates a NEW dataset (named `name`, else
+    # the filename). Passing dataset_id adds the file's leads to that existing
+    # dataset instead. On success the response carries dataset_id so the UI can
+    # navigate straight into the dataset view.
+    return await _ingest(
+        LeadSource.CSV_UPLOAD, _decode(await file.read()),
+        dataset_name=name, file_name=file.filename, dataset_id=dataset_id,
+    )
 
 
 @app.get("/leads")
@@ -198,11 +238,11 @@ def list_top_leads(
     source: str | None = None,
     min_score: float | None = None,
     max_score: float | None = None,
+    dataset_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    # Highest-scoring leads for the "work these first" panels. Ordering + cap
-    # live in SQL, so the response is `limit` rows, not the whole table.
-    # Optional source / score-range filters back the Lead Analytics controls.
-    return top_leads(limit=_clamp(limit, 1, 200), source=source, min_score=min_score, max_score=max_score)
+    # Highest-scoring leads for the "work these first" panels. dataset_id scopes
+    # to one dataset; omitted aggregates across all.
+    return top_leads(limit=_clamp(limit, 1, 200), source=source, min_score=min_score, max_score=max_score, dataset_id=dataset_id)
 
 
 @app.get("/leads/ranked")
@@ -212,13 +252,12 @@ def list_ranked_leads(
     source: str | None = None,
     min_score: float | None = None,
     max_score: float | None = None,
+    dataset_id: str | None = None,
 ) -> dict[str, Any]:
-    # Paginated score-ranked call list: one page of rows + the true match
-    # total, so the UI can page without downloading the whole table. limit is
-    # capped and offset floored so a hand-crafted request can't ask for a
-    # multi-megabyte page or a negative window.
+    # Paginated score-ranked call list: one page of rows + the true match total.
     return ranked_leads(
-        limit=_clamp(limit, 1, 500), offset=max(0, offset), source=source, min_score=min_score, max_score=max_score
+        limit=_clamp(limit, 1, 500), offset=max(0, offset), source=source,
+        min_score=min_score, max_score=max_score, dataset_id=dataset_id,
     )
 
 
@@ -229,19 +268,17 @@ def search_leads_endpoint(
     limit: int = 200,
     min_score: float | None = None,
     flagged: bool | None = None,
+    dataset_id: str | None = None,
 ) -> dict[str, Any]:
-    # Server-side search for the Leads table: returns the matching page of
-    # rows plus the true match total ("showing N of M"), without the browser
-    # ever downloading M rows. min_score / flagged back the smart-filter
-    # controls (score slider, high-quality vs suspicious toggles).
-    return search_leads(q=q, source=source, limit=_clamp(limit, 1, 500), min_score=min_score, flagged=flagged)
+    # Server-side search for the Leads table (name/email), with smart-filter
+    # params and optional dataset scoping.
+    return search_leads(q=q, source=source, limit=_clamp(limit, 1, 500), min_score=min_score, flagged=flagged, dataset_id=dataset_id)
 
 
 @app.get("/leads/call-list")
-def get_call_list(limit: int = 20) -> list[dict[str, Any]]:
-    # The rep's prioritized queue: highest-scoring leads still to be worked,
-    # with high_priority floated to the top and contacted/dead leads removed.
-    return call_list(limit=_clamp(limit, 1, 200))
+def get_call_list(limit: int = 20, dataset_id: str | None = None) -> list[dict[str, Any]]:
+    # The rep's prioritized queue, optionally scoped to one dataset.
+    return call_list(limit=_clamp(limit, 1, 200), dataset_id=dataset_id)
 
 
 @app.post("/leads/{lead_id}/status")
@@ -260,10 +297,9 @@ def update_lead_status(lead_id: str, body: StatusUpdate) -> JSONResponse:
 
 
 @app.get("/analytics/source-performance")
-def analytics_source_performance() -> list[dict[str, Any]]:
-    # Per-source scorecard: volume, avg quality score, and junk rate -- for the
-    # Source Performance view (best/worst feed at a glance).
-    return source_performance()
+def analytics_source_performance(dataset_id: str | None = None) -> list[dict[str, Any]]:
+    # Per-source scorecard: volume, avg quality score, and junk rate.
+    return source_performance(dataset_id=dataset_id)
 
 
 @app.get("/pipeline/runs")
@@ -279,6 +315,62 @@ def pipeline_status(run_id: str) -> JSONResponse:
     if run is None:
         return JSONResponse(status_code=404, content={"status": "error", "message": "Run not found."})
     return JSONResponse(run)
+
+
+@app.get("/datasets")
+def datasets_list(limit: int = 100) -> list[dict[str, Any]]:
+    # All datasets, newest first, for the Datasets list view.
+    return list_datasets(limit=_clamp(limit, 1, 500))
+
+
+@app.get("/datasets/{dataset_id}")
+def datasets_get(dataset_id: str) -> JSONResponse:
+    ds = get_dataset(dataset_id)
+    if ds is None:
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Dataset not found."})
+    return JSONResponse(ds)
+
+
+@app.patch("/datasets/{dataset_id}")
+def datasets_update(dataset_id: str, body: DatasetUpdate) -> JSONResponse:
+    # Rename / annotate a dataset. Unknown id -> friendly 404.
+    if not update_dataset(dataset_id, name=body.name, notes=body.notes, tags=body.tags):
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Dataset not found."})
+    return JSONResponse(get_dataset(dataset_id) or {"status": "ok"})
+
+
+@app.delete("/datasets/{dataset_id}")
+def datasets_delete(dataset_id: str) -> JSONResponse:
+    # Delete a dataset and every row tagged with it. Unknown id -> 404.
+    if not delete_dataset(dataset_id):
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Dataset not found."})
+    return JSONResponse({"status": "ok", "deleted": dataset_id})
+
+
+@app.get("/datasets/{dataset_id}/export")
+def datasets_export(dataset_id: str):
+    # Download a dataset's leads as CSV.
+    ds = get_dataset(dataset_id)
+    if ds is None:
+        return JSONResponse(status_code=404, content={"status": "error", "message": "Dataset not found."})
+    rows = search_leads(limit=1_000_000, dataset_id=dataset_id)["rows"]
+    buf = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    safe = "".join(c for c in (ds.get("name") or "dataset") if c.isalnum() or c in " -_").strip() or "dataset"
+    return PlainTextResponse(
+        buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{safe}.csv"'},
+    )
+
+
+@app.post("/admin/backfill-datasets")
+def admin_backfill_datasets() -> JSONResponse:
+    # One-time migration: group pre-datasets leads into one dataset per source.
+    return JSONResponse({"status": "ok", **backfill_datasets_by_source()})
 
 
 @app.post("/admin/reset")
@@ -303,11 +395,10 @@ def admin_reset(body: ResetOptions) -> JSONResponse:
 
 
 @app.get("/analytics")
-def analytics() -> dict[str, Any]:
-    # SQL-aggregated per-source metrics + score-bucket histogram that drive
-    # every chart/KPI on the dashboard. Replaces the old client-side reduction
-    # over a 32 MB /leads?limit=100000 download (see storage.get_analytics).
-    return get_analytics()
+def analytics(dataset_id: str | None = None) -> dict[str, Any]:
+    # SQL-aggregated per-source metrics + score-bucket histogram, optionally
+    # scoped to one dataset.
+    return get_analytics(dataset_id=dataset_id)
 
 
 @app.get("/duplicates")
@@ -326,10 +417,9 @@ def list_healing_events(limit: int = 1000) -> list[dict[str, Any]]:
 
 
 @app.get("/stats")
-def stats() -> dict[str, Any]:
-    # SQL-aggregated (COUNT/AVG/GROUP BY) rather than loading entire
-    # tables into pandas -- see app/utils/storage.py:get_stats for why.
-    return {**get_stats(), "human_review_pending": len(human_review.read_all())}
+def stats(dataset_id: str | None = None) -> dict[str, Any]:
+    # SQL-aggregated KPIs, optionally scoped to one dataset.
+    return {**get_stats(dataset_id=dataset_id), "human_review_pending": len(human_review.read_all())}
 
 
 @app.get("/human-review")

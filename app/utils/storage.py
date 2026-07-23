@@ -72,35 +72,38 @@ def _ensure_columns(engine, table: str, row_keys: list[str]) -> None:
         pass
 
 
-def save_leads(leads: list[Lead], table: str = "leads") -> None:
+def save_leads(leads: list[Lead], table: str = "leads", dataset_id: str | None = None) -> None:
     if not leads:
         return
-    rows = [_lead_to_row(lead) for lead in leads]
+    rows = [{**_lead_to_row(lead), "dataset_id": dataset_id} for lead in leads]
     _ensure_columns(get_engine(), table, list(rows[0].keys()))
     df = pd.DataFrame(rows)
     df.to_sql(table, get_engine(), if_exists="append", index=False)
 
 
-def save_invalid(invalid: list[dict], source: str, table: str = "invalid_leads") -> None:
+def save_invalid(invalid: list[dict], source: str, table: str = "invalid_leads", dataset_id: str | None = None) -> None:
     if not invalid:
         return
     df = pd.DataFrame(
         [
             {
                 "source": source,
+                "dataset_id": dataset_id,
                 "record": json.dumps(item["record"], default=str),
                 "errors": json.dumps(item["errors"], default=str),
             }
             for item in invalid
         ]
     )
+    _ensure_columns(get_engine(), table, ["dataset_id"])
     df.to_sql(table, get_engine(), if_exists="append", index=False)
 
 
-def save_healing_events(source: str, events: list[dict], table: str = "healing_events") -> None:
+def save_healing_events(source: str, events: list[dict], table: str = "healing_events", dataset_id: str | None = None) -> None:
     if not events:
         return
-    df = pd.DataFrame([{**event, "source": source} for event in events])
+    df = pd.DataFrame([{**event, "source": source, "dataset_id": dataset_id} for event in events])
+    _ensure_columns(get_engine(), table, ["dataset_id"])
     df.to_sql(table, get_engine(), if_exists="append", index=False)
 
 
@@ -219,7 +222,7 @@ def find_existing_leads(emails: list[str], phones: list[str]) -> dict[str, str]:
     return matches
 
 
-def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
+def persist_leads_atomic(leads: list[Lead], dataset_id: str | None = None) -> tuple[list[Lead], list[Lead]]:
     """The race-safe version of "check if it exists, then insert" -- the
     only place that's actually allowed to write to `leads`. On Postgres,
     each lead's email and phone are hashed into a `pg_advisory_xact_lock`
@@ -251,16 +254,16 @@ def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
         # column types the first time around. Nothing else exists yet for
         # this row to race against.
         first, rest = leads[0], leads[1:]
-        df = pd.DataFrame([_lead_to_row(first)])
+        df = pd.DataFrame([{**_lead_to_row(first), "dataset_id": dataset_id}])
         df.to_sql("leads", engine, if_exists="append", index=False)
         kept, duplicates = [first], []
         if rest:
-            more_kept, more_duplicates = persist_leads_atomic(rest)
+            more_kept, more_duplicates = persist_leads_atomic(rest, dataset_id)
             kept += more_kept
             duplicates += more_duplicates
         return kept, duplicates
 
-    _ensure_columns(engine, "leads", list(_lead_to_row(leads[0]).keys()))
+    _ensure_columns(engine, "leads", list(_lead_to_row(leads[0]).keys()) + ["dataset_id"])
 
     kept: list[Lead] = []
     duplicates: list[Lead] = []
@@ -275,6 +278,12 @@ def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
     # original bug). A short transaction per lead releases each pair of
     # locks immediately, so the count in flight at any moment stays small
     # regardless of how many leads are in the batch.
+    # Dedup is scoped to the dataset: the same person appearing in two
+    # different uploads is kept in both (datasets are isolated), but a repeat
+    # within one dataset is still collapsed. The advisory-lock keys carry the
+    # dataset_id for the same reason -- two different datasets never serialize
+    # on the same identifier.
+    scope = f"{dataset_id}:" if dataset_id is not None else ""
     for lead in leads:
         email_key = lead.email.lower() if lead.email else None
         with engine.begin() as conn:
@@ -283,25 +292,27 @@ def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
                 # regardless of which lead is being processed, so two
                 # leads racing on both keys in opposite order can't
                 # deadlock each other. A lead with neither identifier
-                # (schema now allows both to be null -- see
-                # app/schema/canonical.py) has nothing to protect against
-                # concurrent duplicates, so it skips locking entirely and
-                # is always treated as new.
+                # has nothing to protect against and skips locking.
                 if email_key:
-                    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"email:{email_key}"})
+                    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"{scope}email:{email_key}"})
                 if lead.phone_e164:
-                    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"phone:{lead.phone_e164}"})
+                    conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": f"{scope}phone:{lead.phone_e164}"})
 
             existing = None
             if email_key or lead.phone_e164:
-                # lower(email) = NULL and phone_e164 = NULL both evaluate
-                # to NULL (never true) in SQL, so passing None through for
-                # whichever identifier is missing is safe -- no need for
-                # explicit IS NOT NULL guards here.
-                existing = conn.execute(
-                    text("SELECT lead_id FROM leads WHERE lower(email) = :email OR phone_e164 = :phone LIMIT 1"),
-                    {"email": email_key, "phone": lead.phone_e164},
-                ).fetchone()
+                # lower(email) = NULL and phone_e164 = NULL both evaluate to
+                # NULL (never true), so passing None for a missing identifier
+                # is safe. The dataset_id guard keeps dedup within the dataset.
+                if dataset_id is not None:
+                    existing = conn.execute(
+                        text("SELECT lead_id FROM leads WHERE dataset_id = :did AND (lower(email) = :email OR phone_e164 = :phone) LIMIT 1"),
+                        {"did": dataset_id, "email": email_key, "phone": lead.phone_e164},
+                    ).fetchone()
+                else:
+                    existing = conn.execute(
+                        text("SELECT lead_id FROM leads WHERE lower(email) = :email OR phone_e164 = :phone LIMIT 1"),
+                        {"email": email_key, "phone": lead.phone_e164},
+                    ).fetchone()
 
             if existing:
                 lead.status = LeadStatus.DUPLICATE
@@ -309,7 +320,7 @@ def persist_leads_atomic(leads: list[Lead]) -> tuple[list[Lead], list[Lead]]:
                 duplicates.append(lead)
                 continue
 
-            row = _lead_to_row(lead)
+            row = {**_lead_to_row(lead), "dataset_id": dataset_id}
             columns = ", ".join(row.keys())
             placeholders = ", ".join(f":{k}" for k in row.keys())
             conn.execute(text(f"INSERT INTO leads ({columns}) VALUES ({placeholders})"), row)
@@ -345,8 +356,16 @@ def _lead_rows(where: str, params: dict, limit: int, order: str, offset: int = 0
         return []
 
 
+def _dataset_clause(dataset_id: str | None, params: dict) -> str:
+    """Append the dataset scope to a WHERE fragment. Omitted -> all datasets."""
+    if dataset_id:
+        params["dataset_id"] = dataset_id
+        return " AND dataset_id = :dataset_id"
+    return ""
+
+
 def _score_filter(
-    source: str | None, min_score: float | None, max_score: float | None
+    source: str | None, min_score: float | None, max_score: float | None, dataset_id: str | None = None
 ) -> tuple[str, dict]:
     """Shared WHERE fragment + bound params for the score-ordered lead lists
     (top preview and paginated call list)."""
@@ -361,6 +380,7 @@ def _score_filter(
     if max_score is not None:
         where += " AND quality_score <= :max_score"
         params["max_score"] = max_score
+    where += _dataset_clause(dataset_id, params)
     return where, params
 
 
@@ -369,11 +389,12 @@ def top_leads(
     source: str | None = None,
     min_score: float | None = None,
     max_score: float | None = None,
+    dataset_id: str | None = None,
 ) -> list[dict]:
     """Highest-scoring leads -- the "work these first" preview. Ordering and
     the row cap are pushed into SQL so only `limit` rows come back, instead of
     the frontend pulling every lead and sorting client-side."""
-    where, params = _score_filter(source, min_score, max_score)
+    where, params = _score_filter(source, min_score, max_score, dataset_id)
     return _lead_rows(where, params, limit, order="quality_score DESC")
 
 
@@ -383,11 +404,12 @@ def ranked_leads(
     source: str | None = None,
     min_score: float | None = None,
     max_score: float | None = None,
+    dataset_id: str | None = None,
 ) -> dict:
     """One page of the score-ranked call list, plus the true total number of
     matches so the UI can render page controls without downloading every row.
     Same source / score-range filters as top_leads."""
-    where, params = _score_filter(source, min_score, max_score)
+    where, params = _score_filter(source, min_score, max_score, dataset_id)
     engine = get_engine()
     total = 0
     if inspect(engine).has_table("leads"):
@@ -406,6 +428,7 @@ def search_leads(
     limit: int = 200,
     min_score: float | None = None,
     flagged: bool | None = None,
+    dataset_id: str | None = None,
 ) -> dict:
     """Server-side search for the Leads table. Returns at most `limit` rows
     plus the true total number of matches, so the UI can say "showing N of M"
@@ -432,6 +455,7 @@ def search_leads(
     if flagged is not None:
         where += " AND status = :status"
         params["status"] = "flagged" if flagged else "clean"
+    where += _dataset_clause(dataset_id, params)
 
     total = 0
     try:
@@ -475,7 +499,7 @@ def _ensure_lead_columns(engine) -> None:
         pass
 
 
-def call_list(limit: int = 20) -> list[dict]:
+def call_list(limit: int = 20, dataset_id: str | None = None) -> list[dict]:
     """The rep's prioritized call queue: highest-scoring leads that still need
     working. Leads marked contacted/not_interested drop off; high_priority
     floats to the top. Same view columns as the other lead lists, plus the
@@ -485,15 +509,17 @@ def call_list(limit: int = 20) -> list[dict]:
     if not inspect(engine).has_table("leads"):
         return []
     hidden = ", ".join(f"'{s}'" for s in _CALL_LIST_HIDDEN)  # fixed literals, not user input
+    params: dict = {"limit": limit}
+    scope = _dataset_clause(dataset_id, params)
     sql = (
         f"SELECT {_LEAD_VIEW_COLUMNS}, disposition FROM leads "
-        f"WHERE quality_score IS NOT NULL AND (disposition IS NULL OR disposition NOT IN ({hidden})) "
+        f"WHERE quality_score IS NOT NULL AND (disposition IS NULL OR disposition NOT IN ({hidden})){scope} "
         f"ORDER BY (CASE WHEN disposition = 'high_priority' THEN 0 ELSE 1 END), quality_score DESC "
         f"LIMIT :limit"
     )
     try:
         with engine.connect() as conn:
-            return [dict(row._mapping) for row in conn.execute(text(sql), {"limit": limit})]
+            return [dict(row._mapping) for row in conn.execute(text(sql), params)]
     except Exception:
         return []
 
@@ -524,11 +550,11 @@ def set_disposition(lead_id: str, status: str) -> bool:
         return False
 
 
-def source_performance() -> list[dict]:
+def source_performance(dataset_id: str | None = None) -> list[dict]:
     """Per-source scorecard for the Source Performance view: volume, average
     quality score, and the junk rate (share of everything a source sent that
     failed validation). Reuses get_analytics' aggregates -- no extra scan."""
-    a = get_analytics()
+    a = get_analytics(dataset_id)
     by = a["by_source"]
     inv = a["invalid_by_source"]
     dup = a["duplicate_by_source"]
@@ -562,7 +588,7 @@ def source_performance() -> list[dict]:
 # --- Pipeline run tracking --------------------------------------------------
 
 # The lead-data tables a workspace reset clears (operational history + rows).
-_RESET_TABLES = ("leads", "duplicate_leads", "invalid_leads", "healing_events", "pipeline_runs")
+_RESET_TABLES = ("leads", "duplicate_leads", "invalid_leads", "healing_events", "pipeline_runs", "datasets")
 
 
 def _ensure_pipeline_runs(engine) -> None:
@@ -674,20 +700,213 @@ def clear_lead_tables() -> dict[str, str]:
     return result
 
 
-def get_analytics() -> dict:
+# --- Datasets (upload containers) ------------------------------------------
+
+_DATASET_COLUMNS = (
+    "dataset_id, name, file_name, source_kind, status, total_leads, clean, flagged, "
+    "invalid, duplicates, avg_score, notes, tags, created_at, finished_at, time_taken_ms"
+)
+
+
+def _ensure_datasets(engine) -> None:
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE TABLE IF NOT EXISTS datasets ("
+                    "dataset_id TEXT PRIMARY KEY, name TEXT, file_name TEXT, source_kind TEXT, status TEXT, "
+                    "total_leads INTEGER, clean INTEGER, flagged INTEGER, invalid INTEGER, duplicates INTEGER, "
+                    "avg_score REAL, notes TEXT, tags TEXT, created_at TEXT, finished_at TEXT, time_taken_ms BIGINT)"
+                )
+            )
+    except Exception:
+        pass
+
+
+def create_dataset(name: str, file_name: str | None, source_kind: str) -> str:
+    """Open a dataset (status='processing') for one upload/ingest and return
+    its id. Leads/invalid/duplicate rows for this batch are tagged with it."""
+    engine = get_engine()
+    _ensure_datasets(engine)
+    dataset_id = str(uuid.uuid4())
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO datasets (dataset_id, name, file_name, source_kind, status, created_at) "
+                    "VALUES (:id, :n, :f, :s, 'processing', :t)"
+                ),
+                {"id": dataset_id, "n": name, "f": file_name, "s": source_kind, "t": datetime.now(timezone.utc).isoformat()},
+            )
+    except Exception:
+        pass
+    return dataset_id
+
+
+def finish_dataset(dataset_id: str, *, status: str = "completed") -> None:
+    """Close a dataset: recompute its cached counts (clean/flagged/invalid/
+    duplicates/avg) from the rows tagged with it, and stamp status + elapsed."""
+    engine = get_engine()
+
+    def scalar(conn, sql: str, default=0):
+        try:
+            v = conn.execute(text(sql), {"id": dataset_id}).scalar()
+            return v if v is not None else default
+        except Exception:
+            return default
+
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text("SELECT created_at FROM datasets WHERE dataset_id = :id"), {"id": dataset_id}).fetchone()
+            now = datetime.now(timezone.utc)
+            ms = None
+            if row and row[0]:
+                try:
+                    ms = int((now - datetime.fromisoformat(row[0])).total_seconds() * 1000)
+                except Exception:
+                    ms = None
+            clean = scalar(conn, "SELECT count(*) FROM leads WHERE dataset_id = :id AND status = 'clean'")
+            flagged = scalar(conn, "SELECT count(*) FROM leads WHERE dataset_id = :id AND status = 'flagged'")
+            total = scalar(conn, "SELECT count(*) FROM leads WHERE dataset_id = :id")
+            avg = scalar(conn, "SELECT avg(quality_score) FROM leads WHERE dataset_id = :id", default=None)
+            invalid = scalar(conn, "SELECT count(*) FROM invalid_leads WHERE dataset_id = :id")
+            dups = scalar(conn, "SELECT count(*) FROM duplicate_leads WHERE dataset_id = :id")
+            conn.execute(
+                text(
+                    "UPDATE datasets SET status = :st, total_leads = :tot, clean = :c, flagged = :fl, "
+                    "invalid = :inv, duplicates = :d, avg_score = :avg, finished_at = :fin, time_taken_ms = :ms "
+                    "WHERE dataset_id = :id"
+                ),
+                {"st": status, "tot": total, "c": clean, "fl": flagged, "inv": invalid, "d": dups,
+                 "avg": round(avg, 1) if avg is not None else None, "fin": now.isoformat(), "ms": ms, "id": dataset_id},
+            )
+    except Exception:
+        pass
+
+
+def get_dataset(dataset_id: str) -> dict | None:
+    engine = get_engine()
+    _ensure_datasets(engine)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text(f"SELECT {_DATASET_COLUMNS} FROM datasets WHERE dataset_id = :id"), {"id": dataset_id}).fetchone()
+            return dict(row._mapping) if row else None
+    except Exception:
+        return None
+
+
+def list_datasets(limit: int = 100) -> list[dict]:
+    engine = get_engine()
+    _ensure_datasets(engine)
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(text(f"SELECT {_DATASET_COLUMNS} FROM datasets ORDER BY created_at DESC LIMIT :limit"), {"limit": limit})
+            return [dict(r._mapping) for r in rows]
+    except Exception:
+        return []
+
+
+def update_dataset(dataset_id: str, name: str | None = None, notes: str | None = None, tags: str | None = None) -> bool:
+    """Rename / annotate a dataset. Returns False if it doesn't exist."""
+    engine = get_engine()
+    _ensure_datasets(engine)
+    sets, params = [], {"id": dataset_id}
+    if name is not None:
+        sets.append("name = :name"); params["name"] = name.strip() or "Untitled dataset"
+    if notes is not None:
+        sets.append("notes = :notes"); params["notes"] = notes
+    if tags is not None:
+        sets.append("tags = :tags"); params["tags"] = tags
+    if not sets:
+        return get_dataset(dataset_id) is not None
+    try:
+        with engine.begin() as conn:
+            if not conn.execute(text("SELECT 1 FROM datasets WHERE dataset_id = :id LIMIT 1"), {"id": dataset_id}).fetchone():
+                return False
+            conn.execute(text(f"UPDATE datasets SET {', '.join(sets)} WHERE dataset_id = :id"), params)
+            return True
+    except Exception:
+        return False
+
+
+def delete_dataset(dataset_id: str) -> bool:
+    """Delete a dataset and every row tagged with it (leads, duplicates,
+    invalid, healing events). Returns False if the dataset doesn't exist."""
+    engine = get_engine()
+    _ensure_datasets(engine)
+    insp = inspect(engine)
+    try:
+        with engine.begin() as conn:
+            if not conn.execute(text("SELECT 1 FROM datasets WHERE dataset_id = :id LIMIT 1"), {"id": dataset_id}).fetchone():
+                return False
+            for table in ("leads", "duplicate_leads", "invalid_leads", "healing_events"):
+                if insp.has_table(table):
+                    conn.execute(text(f'DELETE FROM "{table}" WHERE dataset_id = :id'), {"id": dataset_id})
+            conn.execute(text("DELETE FROM datasets WHERE dataset_id = :id"), {"id": dataset_id})
+            return True
+    except Exception:
+        return False
+
+
+def backfill_datasets_by_source() -> dict:
+    """One-time migration: any leads/invalid/duplicate/healing rows with no
+    dataset_id (the pre-datasets data) get grouped into one dataset per source,
+    so existing data becomes browsable datasets instead of disappearing.
+    Idempotent -- only touches rows where dataset_id IS NULL."""
+    engine = get_engine()
+    _ensure_datasets(engine)
+    insp = inspect(engine)
+    if not insp.has_table("leads"):
+        return {"datasets_created": 0}
+    # Make sure the dataset_id column exists on every table before we group by it.
+    for table in ("leads", "duplicate_leads", "invalid_leads", "healing_events"):
+        if insp.has_table(table):
+            _ensure_columns(engine, table, ["dataset_id"])
+
+    created = 0
+    try:
+        with engine.connect() as conn:
+            sources = [s for (s,) in conn.execute(text("SELECT DISTINCT source FROM leads WHERE dataset_id IS NULL")) if s]
+        for source in sources:
+            dataset_id = str(uuid.uuid4())
+            name = f"{source.replace('_', ' ').title()} feed (imported)"
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "INSERT INTO datasets (dataset_id, name, file_name, source_kind, status, created_at) "
+                        "VALUES (:id, :n, NULL, :s, 'completed', :t)"
+                    ),
+                    {"id": dataset_id, "n": name, "s": source, "t": datetime.now(timezone.utc).isoformat()},
+                )
+                for table in ("leads", "duplicate_leads", "invalid_leads", "healing_events"):
+                    if insp.has_table(table):
+                        conn.execute(
+                            text(f'UPDATE "{table}" SET dataset_id = :did WHERE source = :s AND dataset_id IS NULL'),
+                            {"did": dataset_id, "s": source},
+                        )
+            finish_dataset(dataset_id, status="completed")
+            created += 1
+    except Exception:
+        pass
+    return {"datasets_created": created}
+
+
+def get_analytics(dataset_id: str | None = None) -> dict:
     """Everything the dashboard's charts and KPIs need, computed as SQL
     aggregates in a handful of GROUP BY queries instead of shipping all
     ~34k leads to the browser to be reduced client-side (the old
     /leads?limit=100000 -> 32 MB path). The payload here is a few KB
-    regardless of table size: per-source metrics + a small score-bucket
-    histogram the frontend re-slices into the butterfly, distribution and
-    funnel charts."""
+    regardless of table size. Scoped to one dataset when dataset_id is given,
+    otherwise aggregates across all datasets."""
     engine = get_engine()
+    params = {"did": dataset_id} if dataset_id else {}
+    lead_where = "WHERE dataset_id = :did" if dataset_id else ""
+    lead_and = "AND dataset_id = :did" if dataset_id else ""
 
     def rows(sql: str) -> list[tuple]:
         try:
             with engine.connect() as conn:
-                return list(conn.execute(text(sql)))
+                return list(conn.execute(text(sql), params))
         except Exception:
             return []
 
@@ -695,7 +914,7 @@ def get_analytics() -> dict:
     # completeness (email/phone/consent/campaign/name present), all in one pass.
     by_source: dict[str, dict] = {}
     for r in rows(
-        """
+        f"""
         SELECT source,
                count(*)                                                         AS total,
                sum(CASE WHEN status = 'clean'   THEN 1 ELSE 0 END)              AS clean,
@@ -707,7 +926,7 @@ def get_analytics() -> dict:
                sum(CASE WHEN consent THEN 1 ELSE 0 END)                        AS consent,
                sum(CASE WHEN campaign_id  IS NOT NULL AND campaign_id  <> '' THEN 1 ELSE 0 END) AS campaign,
                sum(CASE WHEN first_name   IS NOT NULL AND first_name   <> '' THEN 1 ELSE 0 END) AS name
-        FROM leads GROUP BY source
+        FROM leads {lead_where} GROUP BY source
         """
     ):
         source, total, clean, flagged, scored, sum_score, email, phone, consent, campaign, name = r
@@ -724,23 +943,20 @@ def get_analytics() -> dict:
             "name": int(name or 0),
         }
 
-    # Score histogram in 10-point buckets, split by source and status. bucket
-    # = floor(score/10), so 0..9 with a perfect 100 landing in bucket 10 -- the
-    # frontend folds bucket 10 into the top band. ~5 sources x 3 statuses x 11
-    # buckets is a tiny, fixed-size result.
+    # Score histogram in 10-point buckets, split by source and status.
     buckets = [
         {"source": src, "status": status, "bucket": int(bucket), "count": int(count)}
         for src, status, bucket, count in rows(
-            """
+            f"""
             SELECT source, status, floor(quality_score / 10) AS bucket, count(*) AS count
-            FROM leads WHERE quality_score IS NOT NULL
+            FROM leads WHERE quality_score IS NOT NULL {lead_and}
             GROUP BY source, status, floor(quality_score / 10)
             """
         )
     ]
 
-    invalid_by_source = {src: int(c) for src, c in rows("SELECT source, count(*) FROM invalid_leads GROUP BY source")}
-    duplicate_by_source = {src: int(c) for src, c in rows("SELECT source, count(*) FROM duplicate_leads GROUP BY source")}
+    invalid_by_source = {src: int(c) for src, c in rows(f"SELECT source, count(*) FROM invalid_leads {lead_where} GROUP BY source")}
+    duplicate_by_source = {src: int(c) for src, c in rows(f"SELECT source, count(*) FROM duplicate_leads {lead_where} GROUP BY source")}
 
     return {
         "by_source": by_source,
@@ -750,17 +966,19 @@ def get_analytics() -> dict:
     }
 
 
-def get_stats() -> dict:
+def get_stats(dataset_id: str | None = None) -> dict:
     """Same numbers as before, but via SQL aggregation instead of loading
-    entire tables into pandas -- the old version took 1.3s+ at ~90k rows
-    because pandas.read_sql_table() pulls every row over the wire before
-    doing anything, and that only gets worse as the tables grow."""
+    entire tables into pandas. Scoped to one dataset when dataset_id is given,
+    otherwise across all datasets."""
     engine = get_engine()
+    params = {"did": dataset_id} if dataset_id else {}
+    where = "WHERE dataset_id = :did" if dataset_id else ""
+    lead_and = "AND dataset_id = :did" if dataset_id else ""
 
     def scalar(sql: str, default=0):
         try:
             with engine.connect() as conn:
-                result = conn.execute(text(sql)).scalar()
+                result = conn.execute(text(sql), params).scalar()
                 return result if result is not None else default
         except Exception:
             return default
@@ -768,18 +986,18 @@ def get_stats() -> dict:
     def rows(sql: str) -> list[tuple]:
         try:
             with engine.connect() as conn:
-                return list(conn.execute(text(sql)))
+                return list(conn.execute(text(sql), params))
         except Exception:
             return []
 
-    leads_by_source = {source: count for source, count in rows("SELECT source, count(*) FROM leads GROUP BY source")}
+    leads_by_source = {source: count for source, count in rows(f"SELECT source, count(*) FROM leads {where} GROUP BY source")}
 
     return {
         "leads_by_source": leads_by_source,
-        "total_clean": scalar("SELECT count(*) FROM leads WHERE status = 'clean'"),
-        "total_flagged": scalar("SELECT count(*) FROM leads WHERE status = 'flagged'"),
-        "total_invalid": scalar("SELECT count(*) FROM invalid_leads"),
-        "total_duplicates": scalar("SELECT count(*) FROM duplicate_leads"),
-        "avg_quality_score": round(scalar("SELECT avg(quality_score) FROM leads", default=0.0) or 0.0, 2) or None,
-        "self_healing_events": scalar("SELECT count(*) FROM healing_events"),
+        "total_clean": scalar(f"SELECT count(*) FROM leads WHERE status = 'clean' {lead_and}"),
+        "total_flagged": scalar(f"SELECT count(*) FROM leads WHERE status = 'flagged' {lead_and}"),
+        "total_invalid": scalar(f"SELECT count(*) FROM invalid_leads {where}"),
+        "total_duplicates": scalar(f"SELECT count(*) FROM duplicate_leads {where}"),
+        "avg_quality_score": round(scalar(f"SELECT avg(quality_score) FROM leads {where}", default=0.0) or 0.0, 2) or None,
+        "self_healing_events": scalar(f"SELECT count(*) FROM healing_events {where}"),
     }
