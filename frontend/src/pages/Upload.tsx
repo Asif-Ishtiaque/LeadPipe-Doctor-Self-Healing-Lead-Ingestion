@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
+import { useActiveDataset } from "../lib/datasetContext";
 import { Panel } from "../components/ui";
 import { num } from "../lib/format";
 import type { IngestSummary } from "../lib/types";
@@ -22,6 +24,8 @@ const isCsv = (f: File) => /\.csv$/i.test(f.name) || f.type === "text/csv" || f.
 
 export default function Upload() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
+  const { setDatasetId } = useActiveDataset();
   const inputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const [file, setFile] = useState<File | null>(null);
@@ -29,6 +33,7 @@ export default function Upload() {
   const [busy, setBusy] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [result, setResult] = useState<IngestSummary | null>(null);
+  const [newDatasetId, setNewDatasetId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -39,7 +44,7 @@ export default function Upload() {
     return () => clearInterval(id);
   }, [busy]);
 
-  const reset = () => { setResult(null); setNotice(null); setError(null); };
+  const reset = () => { setResult(null); setNewDatasetId(null); setNotice(null); setError(null); };
 
   function pick(f: File | null) {
     if (!f) return;
@@ -57,7 +62,7 @@ export default function Upload() {
     abortRef.current = ac;
     const timeout = setTimeout(() => ac.abort(), UPLOAD_TIMEOUT_MS);
     try {
-      const resp = await api.uploadCsv(file, ac.signal);
+      const resp = await api.uploadDataset(file, { signal: ac.signal });
       if (resp.status === "error") {
         setError(resp.message ?? "We couldn't finish processing this file. Please try again.");
       } else if (!resp.summary) {
@@ -66,7 +71,8 @@ export default function Upload() {
         setNotice("No rows found in this file. Make sure it has a header row and at least one row of data.");
       } else {
         setResult(resp.summary);
-        qc.invalidateQueries(); // refresh dashboard data
+        setNewDatasetId(resp.dataset_id ?? null);
+        qc.invalidateQueries(); // refresh dashboard + dataset list
       }
     } catch (e) {
       if (e instanceof DOMException && e.name === "AbortError") {
@@ -133,7 +139,16 @@ export default function Upload() {
 
       {result && (
         <div className="mt-5">
-          <div className="text-good font-semibold mb-3">✓ Analysis complete — your leads are in.</div>
+          <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+            <div className="text-good font-semibold">✓ Analysis complete — a new dataset is ready.</div>
+            {newDatasetId && (
+              <button
+                onClick={() => { setDatasetId(newDatasetId); navigate("/"); }}
+                className="rounded-xl px-4 py-2 font-semibold text-white bg-brand text-[0.85rem]">
+                View dataset →
+              </button>
+            )}
+          </div>
           <div className="grid grid-cols-3 gap-4 mb-4">
             <Metric label="Scored & kept" value={num(result.scored)} />
             <Metric label="Duplicates merged" value={num(result.duplicates)} />

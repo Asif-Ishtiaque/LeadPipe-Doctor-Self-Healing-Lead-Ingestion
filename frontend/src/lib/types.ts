@@ -25,6 +25,26 @@ export interface Lead {
   raw_payload?: unknown;
 }
 
+// An upload container from /datasets. Every upload is one dataset.
+export interface Dataset {
+  dataset_id: string;
+  name: string;
+  file_name: string | null;
+  source_kind: string | null;
+  status: string; // "processing" | "completed" | "failed"
+  total_leads: number | null;
+  clean: number | null;
+  flagged: number | null;
+  invalid: number | null;
+  duplicates: number | null;
+  avg_score: number | null;
+  notes: string | null;
+  tags: string | null;
+  created_at: string | null;
+  finished_at: string | null;
+  time_taken_ms: number | null;
+}
+
 // One ingest run from /pipeline/runs (or /pipeline/status/{id}).
 export interface PipelineRun {
   run_id: string;
@@ -118,5 +138,6 @@ export interface IngestSummary {
 export interface IngestResponse {
   status: string;
   summary: IngestSummary | null;
+  dataset_id?: string | null;
   message?: string;
 }
